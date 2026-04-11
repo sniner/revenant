@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
 
@@ -81,84 +80,16 @@ jobs:
           fi
           echo "OK: no leftover sandbox state"
 
-  build-musl:
-    name: Static musl release build
+  build-check:
+    name: Release build (default toolchain)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (musl target)
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: musl
 
-      - name: Install musl tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      - name: Build revenantctl (musl, release)
-        run: cargo build --release --locked
-             --target x86_64-unknown-linux-musl
-             -p revenant-cli
-
-      - name: Verify static linkage
-        run: |
-          BIN=target/x86_64-unknown-linux-musl/release/revenantctl
-          file "$BIN"
-          # Modern musl produces position-independent static binaries,
-          # which file(1) reports as "static-pie linked". Accept both.
-          if ! file "$BIN" | grep -qE "static(-pie)? linked"; then
-            echo "ERROR: revenantctl is not statically linked"
-            exit 1
-          fi
-          echo "OK: $(du -h "$BIN" | cut -f1) statically linked binary"
-
-      # On tag pushes, hand the binary off to the release job. Regular
-      # pushes only verify the build; nothing is uploaded.
-      - name: Strip release binary (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: strip target/x86_64-unknown-linux-musl/release/revenantctl
-
-      - name: Stage binary for release (tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: revenantctl-x86_64-musl
-          path: target/x86_64-unknown-linux-musl/release/revenantctl
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test-unit, test-loopback, build-musl]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download musl binary
-        uses: actions/download-artifact@v4
-        with:
-          name: revenantctl-x86_64-musl
-          path: dist
-
-      - name: Rename binary with version + arch suffix
-        run: |
-          chmod +x dist/revenantctl
-          mv dist/revenantctl "dist/revenantctl-${GITHUB_REF_NAME}-x86_64-linux-musl"
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            "dist/revenantctl-${GITHUB_REF_NAME}-x86_64-linux-musl"
+      - name: cargo build --release
+        run: cargo build --release --locked -p revenant-cli

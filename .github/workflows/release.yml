@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            apt_packages: musl-tools
+            asset_suffix: x86_64-linux-musl
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            apt_packages: musl-tools
+            asset_suffix: aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install apt packages
+        if: matrix.apt_packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
+      - name: Build revenantctl
+        run: cargo build --release --locked
+             --target ${{ matrix.target }}
+             -p revenant-cli
+
+      - name: Verify static linkage
+        if: contains(matrix.target, 'musl')
+        run: |
+          BIN=target/${{ matrix.target }}/release/revenantctl
+          file "$BIN"
+          # file(1) reports musl binaries as "statically linked" (classic)
+          # or "static-pie linked" (modern PIE). Accept both.
+          if ! file "$BIN" | grep -qE "static(ally|-pie)? linked"; then
+            echo "ERROR: revenantctl is not statically linked"
+            exit 1
+          fi
+          echo "OK: $(du -h "$BIN" | cut -f1) statically linked binary"
+
+      - name: Strip release binary
+        run: strip target/${{ matrix.target }}/release/revenantctl
+
+      - name: Stage binary with versioned name
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/revenantctl" \
+             "dist/revenantctl-${GITHUB_REF_NAME}-${{ matrix.asset_suffix }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revenantctl-${{ matrix.asset_suffix }}
+          path: dist/revenantctl-*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la dist/
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/revenantctl-*

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/revenant-core",
+    "crates/revenant-cli",
+    "crates/revenant-gui",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "GPL-3.0-only"
+rust-version = "1.85"
+repository = "https://github.com/sniner/revenant"
+homepage = "https://github.com/sniner/revenant"
+
+[workspace.dependencies]
+revenant-core = { path = "crates/revenant-core" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+nix = { version = "0.29", features = ["fs", "ioctl", "mount", "time", "user"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }

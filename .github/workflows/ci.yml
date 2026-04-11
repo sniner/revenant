@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (default features)
+        run: cargo clippy --all --all-targets --locked -- -D warnings
+
+      - name: cargo clippy (loopback-tests feature)
+        run: cargo clippy --all --all-targets --locked
+             --features revenant-core/loopback-tests -- -D warnings
+
+  test-unit:
+    name: Layer A — unit & orchestration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --all --locked
+
+  test-loopback:
+    name: Layer B — loopback btrfs tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install btrfs userspace tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+
+      - name: Run loopback test suite
+        run: ./tools/run-loopback-tests.sh
+
+      - name: Verify cleanup left no traces
+        run: |
+          if [ -e /tmp/revenant-loopback-test ]; then
+            echo "ERROR: sandbox dir still exists after run"
+            ls -la /tmp/revenant-loopback-test
+            exit 1
+          fi
+          if sudo losetup -a | grep -q revenant-loopback-test; then
+            echo "ERROR: stale loop device(s) bound to sandbox files"
+            sudo losetup -a
+            exit 1
+          fi
+          echo "OK: no leftover sandbox state"
+
+  build-musl:
+    name: Static musl release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      - name: Install musl tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build revenantctl (musl, release)
+        run: cargo build --release --locked
+             --target x86_64-unknown-linux-musl
+             -p revenant-cli
+
+      - name: Verify static linkage
+        run: |
+          BIN=target/x86_64-unknown-linux-musl/release/revenantctl
+          file "$BIN"
+          # Modern musl produces position-independent static binaries,
+          # which file(1) reports as "static-pie linked". Accept both.
+          if ! file "$BIN" | grep -qE "static(-pie)? linked"; then
+            echo "ERROR: revenantctl is not statically linked"
+            exit 1
+          fi
+          echo "OK: $(du -h "$BIN" | cut -f1) statically linked binary"
+
+      # On tag pushes, hand the binary off to the release job. Regular
+      # pushes only verify the build; nothing is uploaded.
+      - name: Strip release binary (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: strip target/x86_64-unknown-linux-musl/release/revenantctl
+
+      - name: Stage binary for release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: revenantctl-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/revenantctl
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test-unit, test-loopback, build-musl]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download musl binary
+        uses: actions/download-artifact@v4
+        with:
+          name: revenantctl-x86_64-musl
+          path: dist
+
+      - name: Rename binary with version + arch suffix
+        run: |
+          chmod +x dist/revenantctl
+          mv dist/revenantctl "dist/revenantctl-${GITHUB_REF_NAME}-x86_64-linux-musl"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "dist/revenantctl-${GITHUB_REF_NAME}-x86_64-linux-musl"

@@ -1,0 +1,12 @@
+[package]
+name = "revenant-gui"
+description = "GUI frontend for the Revenant system snapshot tool (placeholder)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+revenant-core = { workspace = true }

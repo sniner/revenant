@@ -1,0 +1,27 @@
+[package]
+name = "revenant-core"
+description = "Core library for the Revenant system snapshot tool"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+# Integration tests against a real loopback btrfs filesystem.
+# Requires root and standard btrfs userspace tools (mkfs.btrfs, losetup,
+# mount, umount). Run via tools/run-loopback-tests.sh which sets up a
+# private mount namespace; never via plain `cargo test` on a host you
+# care about.
+loopback-tests = []
+
+[dependencies]
+chrono = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

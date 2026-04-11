@@ -1,0 +1,71 @@
+# Revenant configuration
+# Copy this file to /etc/revenant/config.toml and adjust to your system.
+# Or run: revenantctl init
+
+[sys]
+# Subvolume holding the OS rootfs (used for restore/bootloader operations)
+rootfs_subvol = "@"
+# Subvolume where snapshots are stored (created automatically if missing)
+snapshot_subvol = "@snapshots"
+
+[sys.rootfs]
+backend = "btrfs"
+# UUID of your btrfs root device (find with: blkid -s UUID -o value /dev/sdXn)
+device_uuid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+[sys.efi]
+# Enable EFI system partition backup
+enabled = true
+# Where the ESP / boot partition is mounted
+mount_point = "/boot"
+# Btrfs subvolume used as staging area for EFI content
+staging_subvol = "@boot"
+
+[sys.bootloader]
+backend = "systemd-boot"
+
+# Strains define snapshot namespaces with their own retention and subvolume sets.
+# At least one strain must be defined.
+
+[strain.default]
+# Subvolumes to snapshot
+subvolumes = ["@"]
+# Whether to sync EFI partition contents (requires sys.efi.enabled = true)
+efi = true
+
+[strain.default.retain]
+# Tiered retention policy (all fields optional, default 0 = disabled).
+# If this section is absent entirely, last = 10 is used as a safe fallback.
+last    = 3      # keep N most recent snapshots regardless of age
+hourly  = 24     # keep newest per clock-hour for N hours
+daily   = 7      # keep newest per calendar-day for N days
+weekly  = 4      # keep newest per ISO-week for N weeks
+monthly = 6      # keep newest per calendar-month for N months
+yearly  = 2      # keep newest per calendar-year for N years
+
+# Example: a separate strain for package manager snapshots
+# [strain.pacman]
+# subvolumes = ["@"]
+# efi = false
+#
+# [strain.pacman.retain]
+# last = 5
+# daily = 7
+
+# Boot-time strain (created by: revenantctl init --systemd)
+# [strain.boot]
+# subvolumes = ["@"]
+# efi = false
+#
+# [strain.boot.retain]
+# last = 5
+
+# Periodic timer strain (created by: revenantctl init --systemd)
+# [strain.periodic]
+# subvolumes = ["@"]
+# efi = false
+#
+# [strain.periodic.retain]
+# last = 5
+# hourly = 48
+# daily = 14

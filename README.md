@@ -16,7 +16,11 @@ it expects Ubuntu-style subvolume layouts. If your system uses systemd-boot, a n
 Btrfs layout, and you actually want your bootloader files to be part of the snapshot, Timeshift
 leaves you on your own.
 
-Revenant was built to fill that gap.
+Revenant was built to fill that gap. It works with any bootloader, but the EFI backup is
+most valuable with systemd-boot, where kernel images and boot entries live on the ESP.
+GRUB-based setups typically keep kernels in `/boot` on the root filesystem (already covered
+by the btrfs snapshot), so the EFI sync adds little there — but revenant's core snapshot and
+restore functionality works just the same.
 
 ## How it compares
 
@@ -29,7 +33,7 @@ Timeshift or snapper, because they are not part of the respective upstream proje
 |---|---|---|---|
 | Filesystem backends | btrfs (ZFS/bcachefs planned) | btrfs, rsync/ext4 | btrfs, ext4, LVM-thin |
 | **EFI partition snapshotted in sync with rootfs** | ✓ | ✗ | ✗ |
-| Bootloader integration | systemd-boot | GRUB2 (reinstalled on restore) | — (rollback just flips `btrfs default subvol`) |
+| Bootloader integration | any (EFI sync most useful with systemd-boot) | GRUB2 (reinstalled on restore) | — (rollback just flips `btrfs default subvol`) |
 | Independent snapshot profiles with own retention | ✓ (strains) | ✗ (fixed Hourly/Daily/Weekly/Monthly/Boot) | ✓ (per-subvolume configs) |
 | Package-manager pre/post hooks (upstream) | ✓ pacman (`init --pacman`); apt/zypp planned | — | zypp (openSUSE) |
 | JSON / scriptable CLI | ✓ `--json` | ✗ | ✓ `--jsonout` |
@@ -42,8 +46,9 @@ Sources: [Timeshift README](https://github.com/linuxmint/timeshift/blob/master/R
 ## What it does
 
 Revenant creates atomic, point-in-time snapshots of a Btrfs system and restores them cleanly.
-The key difference from other tools: **the EFI/boot partition is backed up too**, so a snapshot
-and its corresponding bootloader state are always kept together. A restore is rejected if the
+The key difference from other tools: **the EFI partition is backed up too**, so a snapshot
+and the corresponding ESP state are always kept together. This is especially valuable with
+systemd-boot, where kernels and boot entries live on the ESP. A restore is rejected if the
 EFI snapshot for a given ID is missing.
 
 ### Snapshot naming
@@ -57,6 +62,17 @@ A *strain* is a named snapshot namespace with its own configuration: which subvo
 snapshot, whether to include the EFI partition, and how many snapshots to retain. You can
 define multiple strains for different purposes (e.g. `default` for manual snapshots,
 `pacman` triggered before package upgrades).
+
+### Retention
+
+Each strain defines its own retention policy (`last`, `hourly`, `daily`, …).
+Retention is applied **automatically** every time a new snapshot is created —
+there is no need to run a separate cleanup step to enforce it.
+
+`revenantctl cleanup` serves a different purpose: it removes the old live
+subvolumes (DELETE markers) left behind after a restore.  Run it once you are
+satisfied with the result of a restore and no longer need the pre-restore state
+as a fallback.
 
 ### Restore and the DELETE marker
 
@@ -86,7 +102,7 @@ On restore, both snapshots must be present for the ID.
 ## Current state
 
 - [x] Btrfs backend via direct ioctls (no external `btrfs` binary required)
-- [x] systemd-boot bootloader support
+- [x] Bootloader-agnostic (EFI sync optimised for systemd-boot)
 - [x] EFI partition backup and restore
 - [x] Snapshot creation, listing, deletion
 - [x] Retention policy / cleanup
@@ -133,7 +149,7 @@ Commands:
   list      List all snapshots (optionally filter by strain)
   restore   Restore a snapshot by ID
   delete    Delete a snapshot or all snapshots of a strain
-  cleanup   Apply retention policy and remove old snapshots
+  cleanup   Remove old live subvolumes left after a restore
   status    Show configuration and filesystem status
   check     Run system health checks
 ```
@@ -338,7 +354,7 @@ daily = 7
 ## Requirements
 
 - Linux with a Btrfs root filesystem
-- systemd-boot as bootloader
+- EFI system partition (for EFI sync; systemd-boot recommended)
 - Rust 1.85+ (to build)
 
 ## Disclaimer

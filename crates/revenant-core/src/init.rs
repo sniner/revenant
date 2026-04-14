@@ -142,12 +142,44 @@ fn detect_efi(entries: &[MountInfoEntry]) -> Option<DetectedEfi> {
     None
 }
 
-/// Detect the bootloader by checking for known files.
-fn detect_bootloader(efi_mount: &str) -> Option<String> {
-    let loader_conf = PathBuf::from(efi_mount).join("loader/loader.conf");
-    if loader_conf.exists() {
-        return Some("systemd-boot".to_string());
+/// Detect the bootloader via small filesystem heuristics.
+///
+/// The detected value is purely informational — revenant's restore
+/// mechanism (subvolume rename) is bootloader-agnostic. A `None` return
+/// is mapped to `"unknown"` by the caller.
+fn detect_bootloader(efi_mount: Option<&str>) -> Option<String> {
+    detect_bootloader_with(efi_mount, |p| p.exists())
+}
+
+fn detect_bootloader_with<F>(efi_mount: Option<&str>, exists: F) -> Option<String>
+where
+    F: Fn(&Path) -> bool,
+{
+    // systemd-boot: loader config on the ESP.
+    if let Some(mount) = efi_mount {
+        let loader = PathBuf::from(mount).join("loader/loader.conf");
+        if exists(&loader) {
+            return Some("systemd-boot".to_string());
+        }
     }
+
+    // GRUB via its config in /boot — covers BIOS+GRUB as well as most
+    // EFI+GRUB distros that keep grub.cfg in /boot even when the ESP is
+    // mounted elsewhere (Debian, Ubuntu, Arch, Fedora via grub2, …).
+    for path in &["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"] {
+        if exists(Path::new(path)) {
+            return Some("grub".to_string());
+        }
+    }
+
+    // GRUB when the ESP is mounted at /boot and grub.cfg lives on it.
+    if let Some(mount) = efi_mount {
+        let grub_cfg = PathBuf::from(mount).join("grub/grub.cfg");
+        if exists(&grub_cfg) {
+            return Some("grub".to_string());
+        }
+    }
+
     None
 }
 
@@ -167,7 +199,7 @@ pub fn detect_all() -> Result<DetectedConfig> {
 
     let efi = detect_efi(&entries);
 
-    let bootloader = efi.as_ref().and_then(|e| detect_bootloader(&e.mount_point));
+    let bootloader = detect_bootloader(efi.as_ref().map(|e| e.mount_point.as_str()));
 
     Ok(DetectedConfig {
         backend,
@@ -191,7 +223,7 @@ pub fn build_config(detected: DetectedConfig) -> Config {
 
     let efi_enabled = efi.is_some();
     let efi_mount = efi.map_or_else(|| PathBuf::from("/boot"), |e| PathBuf::from(e.mount_point));
-    let bootloader_backend = bootloader.unwrap_or_else(|| "systemd-boot".to_string());
+    let bootloader_backend = bootloader.unwrap_or_else(|| "unknown".to_string());
 
     let sys = SysConfig {
         rootfs_subvol: rootfs_subvol.clone(),
@@ -265,6 +297,50 @@ mod tests {
         let (device, subvol) = detect_root_mount(&entries).unwrap();
         assert_eq!(device, "/dev/nvme0n1p2");
         assert_eq!(subvol, "@");
+    }
+
+    #[test]
+    fn detect_bootloader_systemd_boot() {
+        let exists = |p: &Path| p == Path::new("/boot/loader/loader.conf");
+        assert_eq!(
+            detect_bootloader_with(Some("/boot"), exists),
+            Some("systemd-boot".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_bootloader_grub_bios() {
+        let exists = |p: &Path| p == Path::new("/boot/grub/grub.cfg");
+        assert_eq!(
+            detect_bootloader_with(None, exists),
+            Some("grub".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_bootloader_grub2_fedora() {
+        let exists = |p: &Path| p == Path::new("/boot/grub2/grub.cfg");
+        assert_eq!(
+            detect_bootloader_with(Some("/boot/efi"), exists),
+            Some("grub".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_bootloader_grub_on_esp() {
+        // ESP mounted at /efi, grub.cfg on it.
+        let exists = |p: &Path| p == Path::new("/efi/grub/grub.cfg");
+        assert_eq!(
+            detect_bootloader_with(Some("/efi"), exists),
+            Some("grub".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_bootloader_none() {
+        let exists = |_: &Path| false;
+        assert_eq!(detect_bootloader_with(Some("/boot"), exists), None);
+        assert_eq!(detect_bootloader_with(None, |_: &Path| false), None);
     }
 
     #[test]

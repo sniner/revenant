@@ -22,6 +22,8 @@ mount_point = "/boot"
 staging_subvol = "@boot"
 
 [sys.bootloader]
+# Informational only — restore uses subvolume rename and is bootloader-agnostic.
+# `revenantctl init` auto-detects this; typical values: "systemd-boot", "grub", "unknown".
 backend = "systemd-boot"
 
 # Strains define snapshot namespaces with their own retention and subvolume sets.

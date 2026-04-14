@@ -22,6 +22,10 @@ GRUB-based setups typically keep kernels in `/boot` on the root filesystem (alre
 by the btrfs snapshot), so the EFI sync adds little there — but revenant's core snapshot and
 restore functionality works just the same.
 
+An EFI partition is **not** required. On BIOS systems, or any setup where `/boot` is a
+directory inside the rootfs, set `sys.efi.enabled = false` in the config and revenant
+operates as a pure rootfs snapshot tool. `revenantctl init` detects this automatically.
+
 ## How it compares
 
 Only the rows where the three tools actually differ — all of them can take snapshots,
@@ -49,7 +53,8 @@ Revenant creates atomic, point-in-time snapshots of a Btrfs system and restores 
 The key difference from other tools: **the EFI partition is backed up too**, so a snapshot
 and the corresponding ESP state are always kept together. This is especially valuable with
 systemd-boot, where kernels and boot entries live on the ESP. A restore is rejected if the
-EFI snapshot for a given ID is missing.
+EFI snapshot for a given ID is missing. On systems without an EFI partition, EFI sync can
+be disabled entirely and revenant runs as a rootfs-only snapshot tool.
 
 ### Snapshot naming
 
@@ -354,7 +359,7 @@ daily = 7
 ## Requirements
 
 - Linux with a Btrfs root filesystem
-- EFI system partition (for EFI sync; systemd-boot recommended)
+- Optional: EFI system partition (for EFI sync; most valuable with systemd-boot)
 - Rust 1.85+ (to build)
 
 ## Disclaimer

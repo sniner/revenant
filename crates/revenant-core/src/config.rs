@@ -74,13 +74,15 @@ fn default_staging_subvol() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootloaderConfig {
-    /// Bootloader backend (currently only "systemd-boot").
+    /// Bootloader backend as detected or configured. Informational only:
+    /// restore works by subvolume rename and does not depend on this value.
+    /// Typical values: `"systemd-boot"`, `"grub"`, `"unknown"`.
     #[serde(default = "default_bootloader_backend")]
     pub backend: String,
 }
 
 fn default_bootloader_backend() -> String {
-    "systemd-boot".to_string()
+    "unknown".to_string()
 }
 
 /// Tiered retention policy for a snapshot strain.
@@ -188,12 +190,6 @@ impl Config {
             return Err(RevenantError::Config(format!(
                 "unsupported rootfs backend: {}",
                 self.sys.rootfs.backend
-            )));
-        }
-        if self.sys.bootloader.backend != "systemd-boot" {
-            return Err(RevenantError::Config(format!(
-                "unsupported bootloader backend: {}",
-                self.sys.bootloader.backend
             )));
         }
         if self.strain.is_empty() {

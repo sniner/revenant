@@ -162,6 +162,7 @@ mod tests {
             strain: "test".to_string(),
             subvolumes: vec!["@".to_string()],
             efi_synced: false,
+            metadata: None,
         }
     }
 

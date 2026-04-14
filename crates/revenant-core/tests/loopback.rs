@@ -20,6 +20,7 @@ use common::TestFs;
 use revenant_core::backend::FileSystemBackend;
 use revenant_core::backend::btrfs::BtrfsBackend;
 use revenant_core::config::Config;
+use revenant_core::metadata::Trigger;
 use revenant_core::restore::restore_snapshot;
 use revenant_core::snapshot::{create_snapshot, find_snapshot};
 
@@ -250,7 +251,15 @@ fn e2e_create_snapshot_against_real_backend() {
     backend.create_subvolume(&fs.mount.join("@")).unwrap();
     std::fs::write(fs.mount.join("@/hello.txt"), "world").unwrap();
 
-    let info = create_snapshot(&config, &backend, &fs.mount, "default").unwrap();
+    let info = create_snapshot(
+        &config,
+        &backend,
+        &fs.mount,
+        "default",
+        None,
+        Trigger::default(),
+    )
+    .unwrap();
     assert_eq!(info.strain, "default");
     assert_eq!(info.subvolumes, vec!["@".to_string()]);
 
@@ -278,7 +287,15 @@ fn e2e_restore_rolls_back_live_state() {
     std::fs::write(root.join("state.txt"), "before").unwrap();
 
     // Capture the "before" state.
-    let snap = create_snapshot(&config, &backend, &fs.mount, "default").unwrap();
+    let snap = create_snapshot(
+        &config,
+        &backend,
+        &fs.mount,
+        "default",
+        None,
+        Trigger::default(),
+    )
+    .unwrap();
     let snap_id = snap.id.clone();
 
     distinct_second();
@@ -338,7 +355,15 @@ fn e2e_restore_preserves_nested_subvol_data() {
 
     // Snapshot @.  btrfs does not recurse into nested subvols, so
     // the nested portables data is NOT captured here.
-    let snap = create_snapshot(&config, &backend, &fs.mount, "default").unwrap();
+    let snap = create_snapshot(
+        &config,
+        &backend,
+        &fs.mount,
+        "default",
+        None,
+        Trigger::default(),
+    )
+    .unwrap();
     let snap_id = snap.id.clone();
 
     distinct_second();
@@ -391,7 +416,15 @@ fn e2e_restore_creates_parent_path_for_nested_added_after_snapshot() {
     std::fs::write(root.join("state.txt"), "before").unwrap();
 
     // Snapshot now — note: no var/ tree at all yet.
-    let snap = create_snapshot(&config, &backend, &fs.mount, "default").unwrap();
+    let snap = create_snapshot(
+        &config,
+        &backend,
+        &fs.mount,
+        "default",
+        None,
+        Trigger::default(),
+    )
+    .unwrap();
     let snap_id = snap.id.clone();
 
     distinct_second();
@@ -519,6 +552,7 @@ fn e2e_restore_rejects_incomplete_snapshot() {
         strain: "default".to_string(),
         subvolumes: vec!["@".to_string()],
         efi_synced: false,
+        metadata: None,
     };
 
     let err = restore_snapshot(&config, &backend, &fs.mount, &bogus).unwrap_err();

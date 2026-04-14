@@ -8,6 +8,7 @@ pub mod config;
 pub mod efi;
 pub mod error;
 pub mod init;
+pub mod metadata;
 pub mod pkgmgr;
 pub mod restore;
 pub mod retention;

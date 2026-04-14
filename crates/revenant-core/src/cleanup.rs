@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::config::{Config, DELETE_STRAIN, RetainConfig};
 use crate::error::Result;
+use crate::metadata;
 use crate::retention::{KeepReason, select_to_keep, select_to_keep_explained};
 use crate::snapshot::{self, SnapshotId, SnapshotInfo};
 
@@ -380,15 +381,60 @@ pub fn plan_retention(
     })
 }
 
-/// Apply per-strain retention policy: keep only the most recent `retain` snapshots per strain.
+/// Remove sidecar metadata files whose matching snapshot subvolume is gone.
 ///
-/// Also purges any DELETE-marked subvolumes left over from previous restores.
-/// Discovers snapshots on disk, then delegates to `apply_retention_to`.
-pub fn apply_retention(
+/// Delegates discovery to [`metadata::find_orphaned_sidecars`] and only
+/// handles the remove-per-entry side. Per-entry removal failures are
+/// logged and skipped — the command always succeeds so that a single
+/// unreadable entry cannot block retention.
+pub fn purge_orphaned_sidecars(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<Vec<String>> {
+    let snap_dir = toplevel.join(&config.sys.snapshot_subvol);
+    let orphans = metadata::find_orphaned_sidecars(&snap_dir, backend)?;
+
+    let mut removed = Vec::new();
+    for orphan in orphans {
+        match std::fs::remove_file(&orphan.path) {
+            Ok(()) => {
+                tracing::info!("cleanup: purging orphaned sidecar '{}'", orphan.name);
+                removed.push(orphan.name);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "could not delete sidecar '{}': {e} (will be retried on next run)",
+                    orphan.name
+                );
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Combined result of a live `cleanup` run. Separates subvolume removals
+/// (retention drops + purged DELETE markers) from orphaned sidecar file
+/// removals so the UI can report each category individually.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CleanupSummary {
+    /// Snapshot IDs and DELETE marker names that were removed.
+    pub removed: Vec<String>,
+    /// Filenames of orphaned sidecar metadata files that were removed.
+    pub removed_sidecars: Vec<String>,
+}
+
+/// Apply per-strain retention policy: keep only the most recent `retain` snapshots per strain.
+///
+/// Also purges any DELETE-marked subvolumes left over from previous restores
+/// and any orphaned sidecar metadata files. Discovers snapshots on disk,
+/// then delegates to `apply_retention_to`.
+pub fn apply_retention(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+) -> Result<CleanupSummary> {
     let mut removed = purge_delete_pending_all(config, backend, toplevel)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
     removed.extend(apply_retention_to(
@@ -397,7 +443,11 @@ pub fn apply_retention(
         toplevel,
         &all_snapshots,
     )?);
-    Ok(removed)
+    let removed_sidecars = purge_orphaned_sidecars(config, backend, toplevel)?;
+    Ok(CleanupSummary {
+        removed,
+        removed_sidecars,
+    })
 }
 
 /// Apply per-strain retention policy to a pre-discovered list of snapshots.
@@ -556,11 +606,12 @@ last = 1
             seed_snapshot_for(&mock, &config, toplevel, "default", ts);
         }
 
-        let removed = apply_retention(&config, &mock, toplevel).unwrap();
+        let summary = apply_retention(&config, &mock, toplevel).unwrap();
         // Two oldest should be removed
-        assert_eq!(removed.len(), 2);
-        assert!(removed.contains(&"20260101-000000".to_string()));
-        assert!(removed.contains(&"20260102-000000".to_string()));
+        assert_eq!(summary.removed.len(), 2);
+        assert!(summary.removed.contains(&"20260101-000000".to_string()));
+        assert!(summary.removed.contains(&"20260102-000000".to_string()));
+        assert!(summary.removed_sidecars.is_empty());
 
         // The two newest still exist on disk
         assert!(mock.contains("/top/@snapshots/@-default-20260103-000000"));
@@ -582,10 +633,10 @@ last = 1
             seed_snapshot_for(&mock, &config, toplevel, "periodic", ts);
         }
 
-        let removed = apply_retention(&config, &mock, toplevel).unwrap();
+        let summary = apply_retention(&config, &mock, toplevel).unwrap();
         // default: drops 20260101 (keeps 02 + 03)
         // periodic: drops 20260101 + 20260102 (keeps 03)
-        assert_eq!(removed.len(), 3);
+        assert_eq!(summary.removed.len(), 3);
 
         // Strain isolation: default's snapshots untouched aside from the
         // single drop, periodic's likewise.
@@ -608,8 +659,9 @@ last = 1
             seed_snapshot_for(&mock, &config, toplevel, "default", ts);
         }
 
-        let removed = apply_retention(&config, &mock, toplevel).unwrap();
-        assert!(removed.is_empty());
+        let summary = apply_retention(&config, &mock, toplevel).unwrap();
+        assert!(summary.removed.is_empty());
+        assert!(summary.removed_sidecars.is_empty());
         assert!(mock.contains("/top/@snapshots/@-default-20260101-000000"));
         assert!(mock.contains("/top/@snapshots/@-default-20260102-000000"));
     }
@@ -623,9 +675,52 @@ last = 1
         // Pre-existing DELETE marker (e.g. left over from a prior restore).
         mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000"));
 
-        let removed = apply_retention(&config, &mock, toplevel).unwrap();
-        assert!(removed.contains(&"@-DELETE-20260101-120000".to_string()));
+        let summary = apply_retention(&config, &mock, toplevel).unwrap();
+        assert!(
+            summary
+                .removed
+                .contains(&"@-DELETE-20260101-120000".to_string())
+        );
         assert!(!mock.contains("/top/@-DELETE-20260101-120000"));
+    }
+
+    #[test]
+    fn purge_orphaned_sidecars_removes_only_orphans() {
+        let config = config_retain_last(&["@"], 5);
+        let dir = {
+            let p = std::env::temp_dir().join(format!("revenant-cleanup-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        };
+        let mock = setup_mock(&config, &dir);
+        let snap_dir = dir.join(&config.sys.snapshot_subvol);
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        // Paired sidecar — a subvolume with matching (strain, id) exists
+        // in the mock, so the sidecar must be kept.
+        mock.seed_subvolume(snap_dir.join("@-default-20260316-143022"));
+        let kept_sidecar = snap_dir.join("default-20260316-143022.meta.toml");
+        std::fs::write(&kept_sidecar, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+
+        // Orphan — no subvolume with (strain=default, id=20260101-000000).
+        let orphan_name = "default-20260101-000000.meta.toml";
+        let orphan_path = snap_dir.join(orphan_name);
+        std::fs::write(&orphan_path, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+
+        let removed = purge_orphaned_sidecars(&config, &mock, &dir).unwrap();
+        assert_eq!(removed, vec![orphan_name.to_string()]);
+        assert!(!orphan_path.exists());
+        assert!(kept_sidecar.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_orphaned_sidecars_snap_dir_missing_is_noop() {
+        let config = config_retain_last(&["@"], 5);
+        let toplevel = Path::new("/top");
+        let mock = MockBackend::new();
+        let removed = purge_orphaned_sidecars(&config, &mock, toplevel).unwrap();
+        assert!(removed.is_empty());
     }
 
     // ----- plan_retention -----

@@ -224,6 +224,7 @@ mod tests {
 
     use super::*;
     use crate::backend::mock::MockBackend;
+    use crate::metadata::Trigger;
     use crate::snapshot::{SnapshotId, create_snapshot, discover_snapshots};
 
     /// Build a no-EFI Config with one strain `default` covering the given subvols.
@@ -287,6 +288,7 @@ subvolumes = [{subvol_list}]
             strain: strain.to_string(),
             subvolumes: subvols.iter().map(|s| (*s).to_string()).collect(),
             efi_synced: false,
+            metadata: None,
         }
     }
 
@@ -362,7 +364,15 @@ subvolumes = [{subvol_list}]
             .expect("expected DELETE marker after restore");
 
         // Simulate a post-boot snapshot run.
-        create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
 
         // Marker still present at the same path.
         assert!(

@@ -357,6 +357,78 @@ scenario_efi_sync() {
     assert_eq "ESP marker reverted" "before" "$marker"
 }
 
+# -- snapshot metadata sidecar round trip ------------------------------------
+#
+# Exercises the `--message` / trigger-metadata path end-to-end:
+#   1. snapshot --message writes a sidecar and the message surfaces in list --json
+#   2. --trigger pacman reads package names from stdin and records them
+#   3. deleting a subvol behind its sidecar's back produces an orphaned-sidecar
+#      finding in `check`, and `cleanup` removes the stranded file
+#
+# The sidecar lives in @snapshots which is not mounted on the running system;
+# we mount the btrfs toplevel at /mnt/topvol just for the duration of the
+# filesystem-level assertions.
+scenario_metadata_sidecar() {
+    local rootdev
+    rootdev=$(ssh_exec "findmnt -no SOURCE /")
+
+    step "snapshot with --message writes sidecar metadata"
+    local id
+    id=$(ssh_exec "revenantctl --json snapshot --message 'vm scenario marker'" | extract_snap_id)
+    [[ -n "$id" ]] || { fail "could not create snapshot with message"; return; }
+    info "snapshot id: $id"
+
+    ssh_exec "mkdir -p /mnt/topvol && mount -o subvolid=5 $rootdev /mnt/topvol"
+
+    step "sidecar file exists on disk"
+    assert_ssh_ok "sidecar present" \
+        "ls /mnt/topvol/@snapshots/@-default-$id.meta.toml"
+
+    step "list --json surfaces the message"
+    local json
+    json=$(ssh_exec "revenantctl --json list --strain default")
+    if echo "$json" | grep -q 'vm scenario marker'; then
+        pass "message in JSON list"
+    else
+        fail "message missing from JSON list: $json"
+    fi
+
+    step "simulated pacman trigger captures stdin targets"
+    local pac_id
+    pac_id=$(ssh_exec "printf 'hello\nworld\n' | revenantctl --json snapshot --strain default --trigger pacman" \
+        | extract_snap_id)
+    [[ -n "$pac_id" ]] || { fail "could not create pacman-trigger snapshot"; \
+        ssh_exec "umount /mnt/topvol" || true; return; }
+    local pac_json
+    pac_json=$(ssh_exec "revenantctl --json list --strain default")
+    if echo "$pac_json" | grep -q '"kind":"pacman"' \
+        && echo "$pac_json" | grep -q 'hello' \
+        && echo "$pac_json" | grep -q 'world'; then
+        pass "pacman trigger targets captured"
+    else
+        fail "pacman metadata missing from JSON list: $pac_json"
+    fi
+
+    step "orphaned sidecar: delete subvol, keep sidecar"
+    ssh_exec "btrfs subvolume delete /mnt/topvol/@snapshots/@-default-$id" >/dev/null
+
+    step "check flags the orphaned sidecar"
+    local check_out
+    check_out=$(ssh_exec "revenantctl check" || true)
+    if echo "$check_out" | grep -q 'orphaned-sidecar'; then
+        pass "check reports orphaned sidecar"
+    else
+        fail "check did not flag orphaned sidecar: $check_out"
+    fi
+
+    step "cleanup removes the orphaned sidecar"
+    ssh_exec "revenantctl cleanup" >/dev/null
+    assert_ssh_fail "sidecar file removed" 2 \
+        "test -e /mnt/topvol/@snapshots/@-default-$id.meta.toml"
+
+    ssh_exec "umount /mnt/topvol" || true
+}
+
 # -- cleanup removes DELETE markers ------------------------------------------
 scenario_cleanup_delete_markers() {
     step "expect at least one DELETE marker from prior restore scenarios"
@@ -388,6 +460,7 @@ run_scenario init_smoke
 run_scenario restore_refusal
 run_scenario restore_reboot
 run_scenario efi_sync
+run_scenario metadata_sidecar
 run_scenario cleanup_delete_markers
 
 echo

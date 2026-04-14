@@ -126,9 +126,21 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
     let toplevel = mount_toplevel(&config)?;
 
     let result = match cli.command {
-        cli::Command::Snapshot { strain } => {
-            cmd_snapshot(mode, &config, &backend, &toplevel, &strain)
-        }
+        cli::Command::Snapshot {
+            strain,
+            message,
+            trigger,
+            trigger_unit,
+        } => cmd_snapshot(
+            mode,
+            &config,
+            &backend,
+            &toplevel,
+            &strain,
+            message,
+            trigger,
+            trigger_unit,
+        ),
         cli::Command::List { strain } => {
             cmd_list(mode, &config, &backend, &toplevel, strain.as_deref())
         }
@@ -236,16 +248,79 @@ fn recover_pending_orphans(
     Ok(())
 }
 
+/// Convert the CLI-surface trigger flags into a core `Trigger`.
+///
+/// For `--trigger pacman` we also read the package targets from stdin,
+/// which is what the pacman PreTransaction hook feeds us when the hook
+/// is generated with `NeedsTargets` (see `pkgmgr::pacman`). A read
+/// failure does not fail the snapshot: we just record an empty target
+/// list and let the user see what we got.
+fn build_trigger(
+    trigger: Option<cli::TriggerKindArg>,
+    trigger_unit: Option<String>,
+) -> revenant_core::metadata::Trigger {
+    use revenant_core::metadata::{Trigger, TriggerKind};
+
+    let kind: TriggerKind = trigger.map_or(TriggerKind::Manual, Into::into);
+
+    match kind {
+        TriggerKind::Manual | TriggerKind::Unknown => Trigger {
+            kind,
+            ..Trigger::default()
+        },
+        TriggerKind::Pacman => {
+            let targets = read_stdin_lines().unwrap_or_else(|e| {
+                tracing::warn!("failed to read pacman targets from stdin: {e}");
+                Vec::new()
+            });
+            Trigger::pacman(targets)
+        }
+        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => {
+            Trigger::systemd(kind, trigger_unit)
+        }
+    }
+}
+
+/// Read stdin as a list of non-empty, trimmed lines.
+///
+/// Returns an empty vector immediately if stdin is attached to a
+/// terminal: a `revenantctl snapshot --trigger pacman` invoked by a
+/// human would otherwise block on `read` until the user manually sent
+/// EOF. The pacman PreTransaction hook always pipes the target list in,
+/// so it never hits this branch.
+fn read_stdin_lines() -> std::io::Result<Vec<String>> {
+    use std::io::{BufRead, IsTerminal};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_snapshot(
     mode: OutputMode,
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     strain: &str,
+    message: Option<String>,
+    trigger: Option<cli::TriggerKindArg>,
+    trigger_unit: Option<String>,
 ) -> Result<()> {
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    let info = snapshot::create_snapshot(config, backend, toplevel, strain)
+    let trigger = build_trigger(trigger, trigger_unit);
+
+    let info = snapshot::create_snapshot(config, backend, toplevel, strain, message, trigger)
         .context("failed to create snapshot")?;
 
     // Discover once, use for retention
@@ -375,10 +450,10 @@ fn cmd_cleanup(
 
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    let removed = revenant_core::cleanup::apply_retention(config, backend, toplevel)
+    let summary = revenant_core::cleanup::apply_retention(config, backend, toplevel)
         .context("cleanup failed")?;
 
-    output::print_cleanup_result(mode, &removed);
+    output::print_cleanup_result(mode, &summary);
 
     Ok(())
 }
@@ -410,6 +485,7 @@ fn cmd_check(mode: OutputMode, config_path: &Path) -> Result<()> {
         let toplevel = mount_toplevel(&config)?;
 
         let orphans = check::find_orphaned_snapshots(&config, &backend, &toplevel);
+        let orphan_sidecars = check::find_orphaned_sidecars(&config, &backend, &toplevel);
         let nested = check::find_nested_subvolumes(&config, &backend, &toplevel);
 
         unmount_toplevel(&toplevel);
@@ -418,6 +494,13 @@ fn cmd_check(mode: OutputMode, config_path: &Path) -> Result<()> {
             Ok(f) => findings.extend(f),
             Err(e) => findings.push(Finding::error(
                 "orphaned-snapshot",
+                format!("scan failed: {e}"),
+            )),
+        }
+        match orphan_sidecars {
+            Ok(f) => findings.extend(f),
+            Err(e) => findings.push(Finding::error(
+                "orphaned-sidecar",
                 format!("scan failed: {e}"),
             )),
         }

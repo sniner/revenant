@@ -15,12 +15,19 @@ pub struct UnitFile {
     pub content: String,
 }
 
-fn exec_start(bin_path: &Path, config_path: &Path, strain: &str) -> String {
+/// Build the `ExecStart=` line for a revenant snapshot unit.
+///
+/// `%n` is a systemd specifier that expands to the fully qualified unit
+/// name at execution time. Using it instead of a hardcoded service name
+/// means renaming the unit file no longer requires a matching code
+/// change here — the running binary will always see the correct name.
+fn exec_start(bin_path: &Path, config_path: &Path, strain: &str, trigger: &str) -> String {
     format!(
-        "{} --config {} snapshot --strain {}",
+        "{} --config {} snapshot --strain {} --trigger {} --trigger-unit %n",
         bin_path.display(),
         config_path.display(),
         strain,
+        trigger,
     )
 }
 
@@ -42,7 +49,12 @@ ExecStart={}
 [Install]
 WantedBy=multi-user.target
 ",
-            exec_start(&params.bin_path, &params.config_path, &params.boot_strain),
+            exec_start(
+                &params.bin_path,
+                &params.config_path,
+                &params.boot_strain,
+                "systemd-boot",
+            ),
         ),
     };
 
@@ -61,6 +73,7 @@ ExecStart={}
                 &params.bin_path,
                 &params.config_path,
                 &params.periodic_strain,
+                "systemd-periodic",
             ),
         ),
     };
@@ -153,5 +166,17 @@ mod tests {
         let units = generate_units(&params);
         assert!(units[0].content.contains("snapshot --strain boot"));
         assert!(units[1].content.contains("snapshot --strain hourly"));
+    }
+
+    #[test]
+    fn units_pass_trigger_context() {
+        // The trigger-unit is expressed as the systemd specifier `%n`,
+        // which expands to the unit's fully qualified name at execution
+        // time — no coupling to any hardcoded literal in this crate.
+        let units = generate_units(&test_params());
+        assert!(units[0].content.contains("--trigger systemd-boot"));
+        assert!(units[0].content.contains("--trigger-unit %n"));
+        assert!(units[1].content.contains("--trigger systemd-periodic"));
+        assert!(units[1].content.contains("--trigger-unit %n"));
     }
 }

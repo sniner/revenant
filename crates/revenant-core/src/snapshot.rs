@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::config::Config;
 use crate::error::{Result, RevenantError};
+use crate::metadata::{self, SnapshotMetadata, Trigger};
 
 /// Snapshot identifier based on UTC timestamp: YYYYMMDD-HHMMSS.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -60,7 +61,7 @@ impl SnapshotId {
 
 impl fmt::Display for SnapshotId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -80,11 +81,22 @@ pub struct SnapshotInfo {
     pub subvolumes: Vec<String>,
     /// Whether the EFI staging subvolume snapshot is present.
     pub efi_synced: bool,
+    /// Optional sidecar metadata (trigger, message, …). `None` means no
+    /// sidecar file was found or it could not be parsed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SnapshotMetadata>,
 }
 
 /// Return the path to the snapshot subvolume within the toplevel.
-fn snapshot_dir(config: &Config, toplevel: &Path) -> std::path::PathBuf {
+fn snapshot_dir(config: &Config, toplevel: &Path) -> PathBuf {
     toplevel.join(&config.sys.snapshot_subvol)
+}
+
+/// Compute the sidecar metadata path for a snapshot. The sidecar is
+/// keyed on `(strain, id)` only, so reordering the strain's
+/// `subvolumes = [...]` list does not orphan existing metadata.
+fn sidecar_path_for_snapshot(snap_dir: &Path, strain: &str, id: &SnapshotId) -> PathBuf {
+    metadata::sidecar_path(snap_dir, strain, id.as_str())
 }
 
 /// Ensure the snapshot subvolume exists, creating it if necessary.
@@ -92,7 +104,7 @@ fn ensure_snapshot_dir(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-) -> Result<std::path::PathBuf> {
+) -> Result<PathBuf> {
     let dir = snapshot_dir(config, toplevel);
     if !subvol_exists(backend, &dir) {
         tracing::info!("creating snapshot subvolume {}", config.sys.snapshot_subvol);
@@ -168,11 +180,22 @@ pub fn discover_snapshots(
                     .strain
                     .get(&strain)
                     .is_some_and(|sc| sc.efi && subvols.contains(&config.sys.efi.staging_subvol));
+            let metadata = {
+                let p = sidecar_path_for_snapshot(&snap_dir, &strain, &id);
+                match metadata::read(&p) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("ignoring unreadable metadata {}: {e}", p.display());
+                        None
+                    }
+                }
+            };
             Some(SnapshotInfo {
                 id,
                 strain,
                 subvolumes: subvols,
                 efi_synced,
+                metadata,
             })
         })
         .collect();
@@ -221,6 +244,8 @@ pub fn create_snapshot(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     strain_name: &str,
+    message: Option<String>,
+    trigger: Trigger,
 ) -> Result<SnapshotInfo> {
     let strain_config = config.strain(strain_name)?;
     let id = SnapshotId::now();
@@ -271,12 +296,22 @@ pub fn create_snapshot(
         false
     };
 
-    let info = SnapshotInfo {
+    let mut info = SnapshotInfo {
         id,
         strain: strain_name.to_string(),
         subvolumes: snapshotted_subvols,
         efi_synced,
+        metadata: None,
     };
+
+    // Best-effort sidecar write: the subvolumes already exist, so metadata
+    // loss is preferable to failing a snapshot that is otherwise intact.
+    let metadata = SnapshotMetadata::new(message, trigger);
+    let sidecar = sidecar_path_for_snapshot(&snap_dir, strain_name, &info.id);
+    match metadata::write(&sidecar, &metadata) {
+        Ok(()) => info.metadata = Some(metadata),
+        Err(e) => tracing::warn!("failed to write metadata {}: {e}", sidecar.display()),
+    }
 
     tracing::info!("snapshot {} created successfully", info.id);
     Ok(info)
@@ -302,6 +337,11 @@ pub fn delete_snapshot(
             tracing::info!("deleting subvolume {}", snap_path.display());
             backend.delete_subvolume(&snap_path)?;
         }
+    }
+
+    let sidecar = sidecar_path_for_snapshot(&snap_dir, &snapshot.strain, &snapshot.id);
+    if let Err(e) = metadata::remove(&sidecar) {
+        tracing::warn!("failed to remove metadata {}: {e}", sidecar.display());
     }
 
     tracing::info!("snapshot {} deleted", snapshot.id);
@@ -531,7 +571,15 @@ subvolumes = [{subvol_list}]
         let mock = MockBackend::new();
         mock.seed_subvolume(toplevel.join("@"));
 
-        let info = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         assert_eq!(info.strain, "default");
         assert_eq!(info.subvolumes, vec!["@".to_string()]);
         assert!(!info.efi_synced);
@@ -553,7 +601,15 @@ subvolumes = [{subvol_list}]
         mock.seed_subvolume(toplevel.join("@"));
         // Note: @snapshots NOT seeded
 
-        let _ = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let _ = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         assert!(mock.contains(toplevel.join("@snapshots")));
     }
 
@@ -565,7 +621,15 @@ subvolumes = [{subvol_list}]
         mock.seed_subvolume(toplevel.join("@"));
         mock.seed_subvolume(toplevel.join("@home"));
 
-        let info = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         let mut subs = info.subvolumes.clone();
         subs.sort();
         assert_eq!(subs, vec!["@".to_string(), "@home".to_string()]);
@@ -582,7 +646,15 @@ subvolumes = [{subvol_list}]
         let mock = MockBackend::new();
         mock.seed_subvolume(toplevel.join("@"));
 
-        let err = create_snapshot(&config, &mock, toplevel, "nonexistent").unwrap_err();
+        let err = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "nonexistent",
+            None,
+            Trigger::default(),
+        )
+        .unwrap_err();
         assert!(format!("{err}").contains("nonexistent"));
     }
 
@@ -593,7 +665,15 @@ subvolumes = [{subvol_list}]
         let mock = MockBackend::new();
         mock.seed_subvolume(toplevel.join("@"));
 
-        let info = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         let snaps = discover_snapshots(&config, &mock, toplevel).unwrap();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].id, info.id);
@@ -609,7 +689,15 @@ subvolumes = [{subvol_list}]
         mock.seed_subvolume(toplevel.join("@"));
         mock.seed_subvolume(toplevel.join("@home"));
 
-        let info = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         let snap_dir = toplevel.join("@snapshots");
         let p_root = snap_dir.join(info.id.snapshot_name("@", "default"));
         let p_home = snap_dir.join(info.id.snapshot_name("@home", "default"));
@@ -628,7 +716,15 @@ subvolumes = [{subvol_list}]
         let mock = MockBackend::new();
         mock.seed_subvolume(toplevel.join("@"));
 
-        let info = create_snapshot(&config, &mock, toplevel, "default").unwrap();
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
         // Delete twice — second call should be a no-op, not an error
         delete_snapshot(&config, &mock, toplevel, &info).unwrap();
         delete_snapshot(&config, &mock, toplevel, &info).unwrap();
@@ -663,6 +759,165 @@ subvolumes = [{subvol_list}]
 
         let removed = delete_all_strain(&config, &mock, toplevel, "default").unwrap();
         assert!(removed.is_empty());
+    }
+
+    // ----- metadata sidecar integration -----
+    //
+    // These tests use a real temp directory so that sidecar file I/O actually
+    // happens (the MockBackend only tracks virtual subvolumes). We pre-create
+    // @snapshots/ as a plain directory inside the temp dir and seed the
+    // corresponding mock subvolume at the same path — the mock covers the
+    // subvol layer, the real filesystem covers the sidecar layer.
+
+    fn temp_toplevel() -> std::path::PathBuf {
+        let name = format!("revenant-snapshot-{}", uuid::Uuid::new_v4());
+        let p = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn create_snapshot_writes_sidecar() {
+        use crate::metadata::{TriggerKind, read};
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        // Pre-create @snapshots as a real directory for the sidecar write.
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            &toplevel,
+            "default",
+            Some("ci test".into()),
+            Trigger::manual(),
+        )
+        .unwrap();
+
+        let sidecar = toplevel
+            .join("@snapshots")
+            .join(format!("default-{}.meta.toml", info.id.as_str()));
+        assert!(sidecar.exists(), "sidecar should be written on disk");
+        let meta = read(&sidecar).unwrap().unwrap();
+        assert_eq!(meta.message.as_deref(), Some("ci test"));
+        assert_eq!(meta.trigger.kind, TriggerKind::Manual);
+        assert!(info.metadata.is_some());
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn discover_attaches_metadata_when_sidecar_present() {
+        use crate::metadata::{SnapshotMetadata, TriggerKind, write};
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = setup_mock(&config, &toplevel);
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-143022"));
+
+        let sidecar = toplevel
+            .join("@snapshots")
+            .join("default-20260316-143022.meta.toml");
+        let meta = SnapshotMetadata::new(Some("hello".into()), Trigger::manual());
+        write(&sidecar, &meta).unwrap();
+
+        let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
+        assert_eq!(snaps.len(), 1);
+        let m = snaps[0].metadata.as_ref().expect("metadata attached");
+        assert_eq!(m.message.as_deref(), Some("hello"));
+        assert_eq!(m.trigger.kind, TriggerKind::Manual);
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn discover_tolerates_missing_sidecar() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = setup_mock(&config, &toplevel);
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-143022"));
+
+        let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert!(snaps[0].metadata.is_none());
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn sidecar_naming_is_stable_under_subvolume_reorder() {
+        // Regression: the sidecar used to be anchored on
+        // config.strain[…].subvolumes.first(). Reordering the list then
+        // silently orphaned existing metadata. The new naming scheme is
+        // (strain, id) only, so the sidecar must remain discoverable.
+        use crate::metadata::TriggerKind;
+
+        let config_a = config_no_efi(&["@", "@home"]);
+        let config_b = config_no_efi(&["@home", "@"]); // same strain, reversed
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@home"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+
+        let info = create_snapshot(
+            &config_a,
+            &mock,
+            &toplevel,
+            "default",
+            Some("anchor-test".into()),
+            Trigger::manual(),
+        )
+        .unwrap();
+
+        let snaps = discover_snapshots(&config_b, &mock, &toplevel).unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].id, info.id);
+        let m = snaps[0]
+            .metadata
+            .as_ref()
+            .expect("metadata must survive subvolume reorder");
+        assert_eq!(m.message.as_deref(), Some("anchor-test"));
+        assert_eq!(m.trigger.kind, TriggerKind::Manual);
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn delete_snapshot_removes_sidecar() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            &toplevel,
+            "default",
+            Some("m".into()),
+            Trigger::manual(),
+        )
+        .unwrap();
+        let sidecar = toplevel
+            .join("@snapshots")
+            .join(format!("default-{}.meta.toml", info.id.as_str()));
+        assert!(sidecar.exists());
+
+        delete_snapshot(&config, &mock, &toplevel, &info).unwrap();
+        assert!(
+            !sidecar.exists(),
+            "sidecar must be removed with the snapshot"
+        );
+
+        std::fs::remove_dir_all(&toplevel).ok();
     }
 
     #[test]

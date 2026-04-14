@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Revenant -- System snapshot tool for Linux
 #[derive(Debug, Parser)]
@@ -40,6 +40,31 @@ impl OutputMode {
     }
 }
 
+/// CLI-facing mirror of `revenant_core::metadata::TriggerKind`. Kept in
+/// this crate so `clap`'s `ValueEnum` derive stays out of `revenant-core`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum TriggerKindArg {
+    Manual,
+    Pacman,
+    SystemdBoot,
+    SystemdPeriodic,
+    Unknown,
+}
+
+impl From<TriggerKindArg> for revenant_core::metadata::TriggerKind {
+    fn from(v: TriggerKindArg) -> Self {
+        use revenant_core::metadata::TriggerKind;
+        match v {
+            TriggerKindArg::Manual => TriggerKind::Manual,
+            TriggerKindArg::Pacman => TriggerKind::Pacman,
+            TriggerKindArg::SystemdBoot => TriggerKind::SystemdBoot,
+            TriggerKindArg::SystemdPeriodic => TriggerKind::SystemdPeriodic,
+            TriggerKindArg::Unknown => TriggerKind::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create a new snapshot
@@ -47,6 +72,19 @@ pub enum Command {
         /// Strain to use for the snapshot
         #[arg(short, long, default_value = "default")]
         strain: String,
+        /// Optional free-form description stored in the snapshot's
+        /// metadata sidecar. Useful for labelling manual snapshots.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Trigger kind recorded in metadata. Defaults to `manual`.
+        /// Package-manager hooks and systemd units pass this themselves;
+        /// it is rarely useful on the command line directly.
+        #[arg(long, value_enum, hide = true)]
+        trigger: Option<TriggerKindArg>,
+        /// Systemd unit that fired this snapshot, recorded alongside
+        /// `--trigger systemd-boot` / `systemd-periodic`.
+        #[arg(long, hide = true)]
+        trigger_unit: Option<String>,
     },
     /// List all snapshots
     List {

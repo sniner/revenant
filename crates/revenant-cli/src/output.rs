@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use revenant_core::check::{Finding, Severity};
-use revenant_core::cleanup::{PlanAction, RetentionPlan};
+use revenant_core::cleanup::{CleanupSummary, PlanAction, RetentionPlan};
 use revenant_core::config::RetainConfig;
+use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
 use revenant_core::snapshot::SnapshotId;
 use revenant_core::{Config, SnapshotInfo};
 
@@ -46,6 +47,77 @@ pub fn emit_json_error(msg: &str) {
 }
 
 // ---------------------------------------------------------------------
+// metadata rendering helpers (text mode only; JSON serializes the raw
+// SnapshotMetadata struct directly via serde).
+// ---------------------------------------------------------------------
+
+/// Truncate a string to at most `max` characters, appending `…` when cut.
+///
+/// Single pass: greedily take `max` chars; if the iterator is drained
+/// the string fit, otherwise drop the last one and append an ellipsis.
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let mut it = s.chars();
+    let head: String = it.by_ref().take(max).collect();
+    if it.next().is_none() {
+        head
+    } else {
+        // Re-take up to `max - 1` to leave room for the ellipsis.
+        let mut out: String = head.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Render a compact one-line summary of the metadata for humans. The
+/// caller decides where to put it (list rows use a subordinate line, the
+/// create/restore flows can print it underneath the primary line).
+fn metadata_summary(meta: &SnapshotMetadata) -> String {
+    let kind = match meta.trigger.kind {
+        TriggerKind::Manual => "manual",
+        TriggerKind::Pacman => "pacman",
+        TriggerKind::SystemdBoot => "systemd-boot",
+        TriggerKind::SystemdPeriodic => "systemd-periodic",
+        TriggerKind::Unknown => "unknown",
+    };
+
+    let detail = match meta.trigger.kind {
+        TriggerKind::Pacman => {
+            let t = meta
+                .trigger
+                .pacman
+                .as_ref()
+                .map(|p| &p.targets[..])
+                .unwrap_or(&[]);
+            if t.is_empty() {
+                String::new()
+            } else if t.len() <= 3 {
+                format!(": {}", t.join(", "))
+            } else {
+                format!(": {}, {}, +{}", t[0], t[1], t.len() - 2)
+            }
+        }
+        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => meta
+            .trigger
+            .systemd
+            .as_ref()
+            .and_then(|s| s.unit.as_deref())
+            .map_or_else(String::new, |u| format!(" ({u})")),
+        _ => String::new(),
+    };
+
+    let message = meta
+        .message
+        .as_deref()
+        .map(|m| format!(" — \"{}\"", truncate(m, 60)))
+        .unwrap_or_default();
+
+    format!("{kind}{detail}{message}")
+}
+
+// ---------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------
 
@@ -66,23 +138,15 @@ pub fn print_snapshot_list(mode: OutputMode, snapshots: &[SnapshotInfo]) {
         return;
     }
 
-    println!(
-        "{:<17} {:<12} {:<22} {:<6} Subvolumes",
-        "ID", "Strain", "Created", "EFI"
-    );
-    println!("{}", "-".repeat(80));
+    println!("{:<17} {:<12} Description", "ID", "Strain");
+    println!("{}", "-".repeat(60));
 
     for snap in snapshots {
-        let created = snap.id.created_at().map_or_else(
-            || "?".to_string(),
-            |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        );
-        let efi = if snap.efi_synced { "yes" } else { "no" };
-        let subvols = snap.subvolumes.join(", ");
-        println!(
-            "{:<17} {:<12} {:<22} {:<6} {}",
-            snap.id, snap.strain, created, efi, subvols
-        );
+        let description = snap
+            .metadata
+            .as_ref()
+            .map_or_else(|| "—".to_string(), metadata_summary);
+        println!("{:<17} {:<12} {}", snap.id, snap.strain, description);
     }
 }
 
@@ -257,25 +321,33 @@ pub fn print_retention_plan(mode: OutputMode, plan: &RetentionPlan) {
 // cleanup (live)
 // ---------------------------------------------------------------------
 
-#[derive(Serialize)]
-struct CleanupOutput<'a> {
-    removed: &'a [String],
-}
-
 /// Render the result of a live cleanup run.
-pub fn print_cleanup_result(mode: OutputMode, removed: &[String]) {
+pub fn print_cleanup_result(mode: OutputMode, summary: &CleanupSummary) {
     if mode.is_json() {
-        emit_json(&CleanupOutput { removed });
+        emit_json(summary);
         return;
     }
 
-    if removed.is_empty() {
+    if summary.removed.is_empty() && summary.removed_sidecars.is_empty() {
         println!("No snapshots to clean up.");
-    } else {
-        for id in removed {
-            println!("Removed: {id}");
-        }
-        println!("Cleaned up {} snapshot(s).", removed.len());
+        return;
+    }
+
+    for id in &summary.removed {
+        println!("Removed: {id}");
+    }
+    for name in &summary.removed_sidecars {
+        println!("Removed orphaned sidecar: {name}");
+    }
+
+    if !summary.removed.is_empty() {
+        println!("Cleaned up {} snapshot(s).", summary.removed.len());
+    }
+    if !summary.removed_sidecars.is_empty() {
+        println!(
+            "Removed {} orphaned sidecar(s).",
+            summary.removed_sidecars.len()
+        );
     }
 }
 
@@ -300,6 +372,9 @@ pub fn print_snapshot_created(mode: OutputMode, info: &SnapshotInfo, retention_r
     }
 
     println!("Snapshot created: {} (strain: {})", info.id, info.strain);
+    if let Some(meta) = info.metadata.as_ref() {
+        println!("  {}", metadata_summary(meta));
+    }
     for id in retention_removed {
         println!("Retention: removed old snapshot {id}");
     }
@@ -705,6 +780,7 @@ mod tests {
             strain: strain.to_string(),
             subvolumes: vec!["@".to_string()],
             efi_synced: efi,
+            metadata: None,
         }
     }
 
@@ -731,6 +807,88 @@ mod tests {
         let out = SnapshotListOutput { snapshots: &[] };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         assert_eq!(got, json!({ "snapshots": [] }));
+    }
+
+    #[test]
+    fn list_json_includes_metadata_when_present() {
+        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        let mut snap = sample_snapshot("20260411-080000", "pacman", false);
+        snap.metadata = Some(SnapshotMetadata::new(
+            Some("test".into()),
+            Trigger::pacman(vec!["linux".into(), "mesa".into()]),
+        ));
+        let out = SnapshotListOutput {
+            snapshots: std::slice::from_ref(&snap),
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        let meta = &got["snapshots"][0]["metadata"];
+        assert_eq!(meta["message"], json!("test"));
+        assert_eq!(meta["trigger"]["kind"], json!("pacman"));
+        assert_eq!(
+            meta["trigger"]["pacman"]["targets"],
+            json!(["linux", "mesa"])
+        );
+    }
+
+    #[test]
+    fn list_json_omits_metadata_when_absent() {
+        let snap = sample_snapshot("20260411-080000", "default", false);
+        let out = SnapshotListOutput {
+            snapshots: std::slice::from_ref(&snap),
+        };
+        let s = to_json_string(&out);
+        assert!(
+            !s.contains("\"metadata\""),
+            "metadata field should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn metadata_summary_manual_with_message() {
+        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        let meta = SnapshotMetadata::new(Some("pre-upgrade".into()), Trigger::manual());
+        let s = metadata_summary(&meta);
+        assert!(s.starts_with("manual"));
+        assert!(s.contains("pre-upgrade"));
+    }
+
+    #[test]
+    fn metadata_summary_pacman_truncates_long_target_list() {
+        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        let meta = SnapshotMetadata::new(
+            None,
+            Trigger::pacman(vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "e".into(),
+            ]),
+        );
+        let s = metadata_summary(&meta);
+        assert!(s.contains("pacman"));
+        assert!(s.contains("a, b, +3"));
+    }
+
+    #[test]
+    fn metadata_summary_systemd_shows_unit() {
+        use revenant_core::metadata::{SnapshotMetadata, Trigger, TriggerKind};
+        let meta = SnapshotMetadata::new(
+            None,
+            Trigger::systemd(
+                TriggerKind::SystemdBoot,
+                Some("revenant-boot.service".into()),
+            ),
+        );
+        let s = metadata_summary(&meta);
+        assert!(s.contains("systemd-boot"));
+        assert!(s.contains("revenant-boot.service"));
+    }
+
+    #[test]
+    fn truncate_longer_than_max() {
+        assert_eq!(truncate("hello", 3), "he…");
+        assert_eq!(truncate("hi", 3), "hi");
     }
 
     #[test]
@@ -850,12 +1008,33 @@ mod tests {
 
     #[test]
     fn cleanup_result_json_shape() {
-        let removed = vec!["20260410-010000".to_string(), "20260410-020000".to_string()];
-        let out = CleanupOutput { removed: &removed };
-        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        let summary = CleanupSummary {
+            removed: vec!["20260410-010000".to_string(), "20260410-020000".to_string()],
+            removed_sidecars: vec![],
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&summary)).unwrap();
         assert_eq!(
             got,
-            json!({"removed": ["20260410-010000", "20260410-020000"]})
+            json!({
+                "removed": ["20260410-010000", "20260410-020000"],
+                "removed_sidecars": [],
+            })
+        );
+    }
+
+    #[test]
+    fn cleanup_result_json_includes_sidecars() {
+        let summary = CleanupSummary {
+            removed: vec![],
+            removed_sidecars: vec!["@-default-20260410-010000.meta.toml".to_string()],
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&summary)).unwrap();
+        assert_eq!(
+            got,
+            json!({
+                "removed": [],
+                "removed_sidecars": ["@-default-20260410-010000.meta.toml"],
+            })
         );
     }
 

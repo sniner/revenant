@@ -14,6 +14,7 @@ use serde::Serialize;
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::config::{Config, DELETE_STRAIN};
 use crate::error::Result;
+use crate::metadata;
 use crate::snapshot::{self, SnapshotId};
 
 /// Severity of a check finding.
@@ -48,6 +49,7 @@ pub struct Finding {
 }
 
 impl Finding {
+    #[must_use]
     pub fn info(check: &'static str, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Info,
@@ -57,6 +59,7 @@ impl Finding {
         }
     }
 
+    #[must_use]
     pub fn warning(check: &'static str, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
@@ -66,6 +69,7 @@ impl Finding {
         }
     }
 
+    #[must_use]
     pub fn error(check: &'static str, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
@@ -237,6 +241,30 @@ pub fn find_orphaned_snapshots(
     }
 
     findings.sort_by(|a, b| a.message.cmp(&b.message));
+    Ok(findings)
+}
+
+/// Find sidecar metadata files in the snapshot directory whose matching
+/// snapshot subvolume is gone. Delegates to
+/// [`metadata::find_orphaned_sidecars`] and wraps each hit in a
+/// [`Finding`].
+pub fn find_orphaned_sidecars(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+) -> Result<Vec<Finding>> {
+    let snap_dir = toplevel.join(&config.sys.snapshot_subvol);
+    let orphans = metadata::find_orphaned_sidecars(&snap_dir, backend)?;
+    let findings = orphans
+        .into_iter()
+        .map(|o| {
+            Finding::warning(
+                "orphaned-sidecar",
+                format!("{}  (no matching snapshot subvolume)", o.name),
+            )
+            .with_hint("run `revenantctl cleanup` to remove orphaned sidecar metadata")
+        })
+        .collect();
     Ok(findings)
 }
 
@@ -442,6 +470,86 @@ subvolumes = [{subvol_list}]
         assert!(findings[1].message.starts_with("@-mremoved-"));
         assert!(findings[2].message.starts_with("@-zremoved-"));
     }
+
+    // ----- find_orphaned_sidecars -----
+
+    fn tmpdir() -> std::path::PathBuf {
+        let name = format!("revenant-check-{}", uuid::Uuid::new_v4());
+        let p = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn write_sidecar(snap_dir: &Path, stem: &str) -> std::path::PathBuf {
+        let p = snap_dir.join(format!("{stem}{}", metadata::SIDECAR_EXTENSION));
+        std::fs::write(&p, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn sidecars_empty_when_snap_dir_missing() {
+        let config = config_one_strain(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = MockBackend::new();
+        let findings = find_orphaned_sidecars(&config, &mock, toplevel).unwrap();
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn sidecars_ignored_when_subvol_present() {
+        let config = config_one_strain(&["@"]);
+        let dir = tmpdir();
+        let mock = setup_mock(&config, &dir);
+        let snap_dir = dir.join(&config.sys.snapshot_subvol);
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        seed_in_snap_dir(&mock, &config, &dir, "@-default-20260316-143022");
+        write_sidecar(&snap_dir, "default-20260316-143022");
+
+        let findings = find_orphaned_sidecars(&config, &mock, &dir).unwrap();
+        assert!(findings.is_empty(), "got: {findings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sidecar_without_subvol_flagged() {
+        let config = config_one_strain(&["@"]);
+        let dir = tmpdir();
+        let mock = setup_mock(&config, &dir);
+        let snap_dir = dir.join(&config.sys.snapshot_subvol);
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        // Sidecar whose subvol was deleted out from under it.
+        write_sidecar(&snap_dir, "default-20260316-143022");
+
+        let findings = find_orphaned_sidecars(&config, &mock, &dir).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "orphaned-sidecar");
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(
+            findings[0]
+                .message
+                .starts_with("default-20260316-143022.meta.toml"),
+            "unexpected message: {}",
+            findings[0].message
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sidecars_ignore_non_sidecar_files() {
+        let config = config_one_strain(&["@"]);
+        let dir = tmpdir();
+        let mock = setup_mock(&config, &dir);
+        let snap_dir = dir.join(&config.sys.snapshot_subvol);
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::write(snap_dir.join("README"), "hello").unwrap();
+        std::fs::write(snap_dir.join("x.toml"), "y = 1").unwrap();
+
+        let findings = find_orphaned_sidecars(&config, &mock, &dir).unwrap();
+        assert!(findings.is_empty(), "got: {findings:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ----- parse_snapshot_name -----
 
     #[test]
     fn parse_simple_name() {

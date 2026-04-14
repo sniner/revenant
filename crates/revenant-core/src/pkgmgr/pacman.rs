@@ -34,8 +34,13 @@ impl PackageManager for Pacman {
         // wrapper ensures the hook always exits 0; revenant's own
         // diagnostics still land on stderr and show up in pacman's
         // output.
+        //
+        // `NeedsTargets` in [Trigger] makes pacman feed the affected
+        // package names to the hook on stdin; `revenantctl snapshot`
+        // reads them when `--trigger pacman` is passed and records them
+        // in the snapshot's metadata sidecar.
         let exec = format!(
-            "/bin/sh -c '{} --config {} snapshot --strain {} || true'",
+            "/bin/sh -c '{} --config {} snapshot --strain {} --trigger pacman || true'",
             params.bin_path.display(),
             params.config_path.display(),
             params.strain,
@@ -55,6 +60,7 @@ Description = Revenant pre-transaction snapshot
 When = PreTransaction
 Exec = {exec}
 Depends = coreutils
+NeedsTargets
 "
         );
 
@@ -129,6 +135,20 @@ mod tests {
         params.strain = "pacman-custom".to_string();
         let hooks = Pacman.generate_hooks(&params);
         assert!(hooks[0].content.contains("snapshot --strain pacman-custom"));
+    }
+
+    #[test]
+    fn hook_requests_targets_on_stdin() {
+        let hooks = Pacman.generate_hooks(&test_params());
+        let content = &hooks[0].content;
+        assert!(
+            content.contains("NeedsTargets"),
+            "hook must set NeedsTargets so stdin carries the package list"
+        );
+        assert!(
+            content.contains("--trigger pacman"),
+            "Exec must pass --trigger pacman so revenantctl knows to read stdin"
+        );
     }
 
     #[test]

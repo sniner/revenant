@@ -61,6 +61,29 @@ be disabled entirely and revenant runs as a rootfs-only snapshot tool.
 Snapshots follow the pattern `{subvol}-{strain}-{timestamp}`, e.g. `@-default-20260316-143022`.
 All information lives in the subvolume name itself — no separate database required.
 
+### Snapshot metadata
+
+Alongside each snapshot, revenant writes an optional TOML sidecar
+`{strain}-{timestamp}.meta.toml` in the snapshot subvolume that records
+*why* the snapshot exists:
+
+- A free-form `--message` supplied by the user on manual snapshots.
+- The trigger kind (`manual`, `pacman`, `systemd-boot`, `systemd-periodic`).
+- For pacman-triggered snapshots, the list of target packages read from
+  the hook's stdin.
+- For systemd-triggered snapshots, the unit that fired them.
+- A local-time `created_at` timestamp (so the sidecar is readable on its own,
+  independent of the UTC id in the subvolume name).
+
+Sidecars are strictly additive: snapshots without a sidecar (legacy or
+externally created) list fine and restore normally. A failure to write the
+sidecar never fails the snapshot itself — metadata loss is preferable to a
+stranded half-created snapshot.
+
+`list` and `snapshot` surface the metadata in both text and JSON output;
+`check` flags sidecars whose snapshot subvolume has disappeared as
+`orphaned-sidecar`, and `cleanup` removes them.
+
 ### Strains
 
 A *strain* is a named snapshot namespace with its own configuration: which subvolumes to
@@ -75,9 +98,10 @@ Retention is applied **automatically** every time a new snapshot is created —
 there is no need to run a separate cleanup step to enforce it.
 
 `revenantctl cleanup` serves a different purpose: it removes the old live
-subvolumes (DELETE markers) left behind after a restore.  Run it once you are
-satisfied with the result of a restore and no longer need the pre-restore state
-as a fallback.
+subvolumes (DELETE markers) left behind after a restore, and sweeps up any
+orphaned metadata sidecars whose snapshot subvolume is gone.  Run it once
+you are satisfied with the result of a restore and no longer need the
+pre-restore state as a fallback.
 
 ### Restore and the DELETE marker
 
@@ -116,6 +140,7 @@ On restore, both snapshots must be present for the ID.
 - [x] Multiple strains with independent retention settings
 - [x] Restore flow with `--yes` confirmation and DELETE-marker undo buffer
 - [x] Snapshots stored in dedicated `@snapshots` subvolume (configurable)
+- [x] Per-snapshot metadata sidecars (`--message`, trigger context, package targets)
 - [ ] VM test harness (Arch Linux)
 - [ ] GUI (`revenant-gui` crate, stub only)
 - [ ] ZFS / bcachefs backends (trait is defined, implementations pending)
@@ -154,7 +179,7 @@ Commands:
   list      List all snapshots (optionally filter by strain)
   restore   Restore a snapshot by ID
   delete    Delete a snapshot or all snapshots of a strain
-  cleanup   Remove old live subvolumes left after a restore
+  cleanup   Remove old live subvolumes and orphaned metadata sidecars
   status    Show configuration and filesystem status
   check     Run system health checks
 ```
@@ -170,13 +195,13 @@ The rough shape per command is:
 
 | Command | JSON payload |
 |---|---|
-| `list` | `{"snapshots": [{"id","strain","subvolumes","efi_synced"}, …]}` |
+| `list` | `{"snapshots": [{"id","strain","subvolumes","efi_synced","metadata"?}, …]}` |
 | `status` | `{"config": {…}, "strain_snapshots": {name: count}, "snapshots_total": N}` |
 | `snapshot` | `{"created": SnapshotInfo, "retention_removed": [id, …]}` |
 | `delete` | `{"strain": "…", "deleted": [id, …]}` |
 | `restore` (`--yes`) | `{"restored": {"id","strain"}, "reboot_required": true}` |
 | `restore` (refusal) | `{"would_restore": {…}, "subvolumes": […], "efi_sync": bool, "proceed_with": "--yes"}`, exit 1 |
-| `cleanup` | `{"removed": [id, …]}` |
+| `cleanup` | `{"removed": [id, …], "removed_sidecars": [name, …]}` |
 | `cleanup --dry-run` | the full `RetentionPlan` — per-strain keep/delete entries plus any DELETE markers |
 | `check` | `{"findings": [{"severity","check","message","hint"?}, …], "summary": {"errors","warnings","infos"}}` |
 | `init` | `{"tasks": [{"task": "detected-system" \| "wrote-config" \| "added-systemd-strains" \| "wrote-systemd-unit" \| "added-pkgmgr-strain" \| "wrote-pkgmgr-hook", …}, …]}` |
@@ -200,6 +225,9 @@ sudo revenantctl init
 
 # Take a snapshot using the default strain
 sudo revenantctl snapshot
+
+# Take a snapshot with a descriptive message (recorded in the sidecar)
+sudo revenantctl snapshot --message "before risky experiment"
 
 # List all snapshots
 revenantctl list
@@ -281,6 +309,10 @@ Current checks:
   configured strain claims. Useful for detecting leftovers from a strain that
   was removed from the config, or accidental snapshots created with a
   different config.
+- **orphaned-sidecar** — sidecar metadata files (`*.meta.toml`) whose
+  matching snapshot subvolume is gone. Typically left behind when a
+  snapshot subvolume was removed by hand. `revenantctl cleanup` removes
+  these alongside DELETE markers.
 - **nested-subvolumes** — informational notice about nested subvolumes
   inside any snapshotted subvolume. Revenant re-attaches them across a
   restore at their current state, but their *contents* are not versioned

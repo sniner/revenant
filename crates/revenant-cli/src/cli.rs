@@ -103,6 +103,12 @@ pub enum Command {
         /// command only prints what would happen and exits with code 1.
         #[arg(long)]
         yes: bool,
+        /// Proceed even when pre-flight checks report blocking issues
+        /// (e.g. a registered systemd-machined machine is currently
+        /// running). Distinct from `--yes`: that confirms the restore
+        /// itself, this overrides safety guards around the live system.
+        #[arg(long)]
+        force: bool,
     },
     /// Delete a snapshot (or all snapshots of a strain with --strain and --all)
     Delete {

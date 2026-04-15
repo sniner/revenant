@@ -10,6 +10,7 @@ pub mod error;
 pub mod init;
 pub mod metadata;
 pub mod pkgmgr;
+pub mod preflight;
 pub mod restore;
 pub mod retention;
 pub mod snapshot;

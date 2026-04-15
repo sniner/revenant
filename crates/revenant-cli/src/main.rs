@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 use revenant_core::backend::btrfs::BtrfsBackend;
 use revenant_core::check::{self, Finding, Severity};
+use revenant_core::preflight;
 use revenant_core::snapshot::{self, SnapshotId};
 use revenant_core::{Config, FileSystemBackend};
 
@@ -148,6 +149,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             snapshot_id,
             strain,
             yes,
+            force,
         } => cmd_restore(
             mode,
             &config,
@@ -156,6 +158,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             &snapshot_id,
             strain.as_deref(),
             yes,
+            force,
         ),
         cli::Command::Delete {
             snapshot_id,
@@ -354,6 +357,7 @@ fn cmd_list(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_restore(
     mode: OutputMode,
     config: &Config,
@@ -362,6 +366,7 @@ fn cmd_restore(
     id_str: &str,
     strain: Option<&str>,
     yes: bool,
+    force: bool,
 ) -> Result<()> {
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
@@ -369,6 +374,23 @@ fn cmd_restore(
 
     let snap = snapshot::find_snapshot(config, backend, toplevel, &id, strain)
         .context("failed to find snapshot")?;
+
+    // Pre-flight gates run before the dry-run / refusal branch so a user
+    // who runs `restore` without `--yes` still sees blocking conditions
+    // up front, not only on the second invocation. `--force` overrides
+    // Error-severity findings; `--yes` does not (the two flags gate
+    // distinct concerns).
+    let preflight_findings =
+        preflight::preflight_restore(Path::new(preflight::MACHINED_RUNTIME_DIR));
+    if !preflight_findings.is_empty() {
+        output::print_findings(mode, &preflight_findings);
+    }
+    let has_blocking = preflight_findings
+        .iter()
+        .any(|f| f.severity == Severity::Error);
+    if has_blocking && !force {
+        return Err(SilentExit(1).into());
+    }
 
     if !yes {
         // Refusal path: explain what would happen and exit with code 1.

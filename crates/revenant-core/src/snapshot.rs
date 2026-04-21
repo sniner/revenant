@@ -204,6 +204,93 @@ pub fn discover_snapshots(
     Ok(snapshots)
 }
 
+/// Reference to the snapshot from which the currently live rootfs
+/// subvolume was cloned. Resolved from btrfs' `parent_uuid` chain at
+/// read time, never persisted: nothing in the sidecar knows about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveParentRef {
+    pub id: SnapshotId,
+    pub strain: String,
+}
+
+/// Width of the `YYYYMMDD-HHMMSS` timestamp embedded in snapshot names.
+const ID_LEN: usize = 15;
+
+/// Identify the snapshot whose subvolume is the btrfs parent of the
+/// currently live rootfs subvolume.
+///
+/// Mechanic: `restore_snapshot` builds the new live subvol via
+/// `create_writable_snapshot(snap, live)`, so afterwards
+/// `live.parent_uuid == snap.uuid`. On a pristine system the live subvol
+/// has no parent uuid and we return `None`.
+///
+/// Only the strain's rootfs subvolume is consulted. Partial per-subvol
+/// restores that leave `@home`/`@boot` on an unrelated lineage are not
+/// reflected — the rootfs is the canonical anchor.
+///
+/// All backend errors are non-fatal: they are logged and the function
+/// returns `None`, so `revenantctl list` never refuses to run because
+/// the anchor could not be resolved.
+pub fn resolve_live_parent(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+) -> Option<LiveParentRef> {
+    let rootfs_path = toplevel.join(&config.sys.rootfs_subvol);
+    let live = match backend.subvolume_info(&rootfs_path) {
+        Ok(info) => info,
+        Err(e) => {
+            tracing::warn!(
+                "cannot read rootfs subvolume info at {}: {e}",
+                rootfs_path.display()
+            );
+            return None;
+        }
+    };
+    let parent_uuid = live.parent_uuid?;
+
+    let snap_dir = snapshot_dir(config, toplevel);
+    if !subvol_exists(backend, &snap_dir) {
+        return None;
+    }
+    let subvols = match backend.list_subvolumes(&snap_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "cannot list snapshot subvolumes at {}: {e}",
+                snap_dir.display()
+            );
+            return None;
+        }
+    };
+
+    let prefix = format!("{}-", config.sys.rootfs_subvol);
+    for sv in &subvols {
+        if sv.uuid != parent_uuid {
+            continue;
+        }
+        let Some(name) = sv.path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.len() < ID_LEN + 2 {
+            continue;
+        }
+        let id_start = rest.len() - ID_LEN;
+        if rest.as_bytes()[id_start - 1] != b'-' {
+            continue;
+        }
+        let Ok(id) = SnapshotId::from_string(&rest[id_start..]) else {
+            continue;
+        };
+        let strain = rest[..id_start - 1].to_string();
+        return Some(LiveParentRef { id, strain });
+    }
+    None
+}
+
 /// Find a specific snapshot by ID. If strain is None and the ID is ambiguous
 /// (exists in multiple strains), returns an error.
 pub fn find_snapshot(
@@ -918,6 +1005,145 @@ subvolumes = [{subvol_list}]
         );
 
         std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    // ----- resolve_live_parent -----
+    //
+    // Exercises the btrfs parent_uuid chain via the MockBackend, which
+    // mirrors btrfs semantics: snapshot creation sets
+    // `parent_uuid = source.uuid` on the child.
+
+    /// Simulate a restore: rename the live subvol out of the way (so it
+    /// is no longer the "live" one), then re-clone it from the given
+    /// snapshot subvol at the original live path. After this call, the
+    /// new live subvol has `parent_uuid == uuid_of(snap_path)`.
+    fn simulate_restore(mock: &MockBackend, live_path: &Path, snap_path: &Path, delete_ts: &str) {
+        let deleted = live_path.with_file_name(format!(
+            "{}-DELETE-{}",
+            live_path.file_name().unwrap().to_string_lossy(),
+            delete_ts,
+        ));
+        mock.rename_subvolume(live_path, &deleted).unwrap();
+        mock.create_writable_snapshot(snap_path, live_path).unwrap();
+    }
+
+    #[test]
+    fn resolve_live_parent_pristine_returns_none() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+        // No snapshots, live @ was created with no parent.
+        assert!(resolve_live_parent(&config, &mock, toplevel).is_none());
+    }
+
+    #[test]
+    fn resolve_live_parent_after_snapshot_returns_none() {
+        // After a snapshot, the parent relationship is snap→live, not
+        // live→snap. live.parent_uuid is still None.
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+        create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
+        assert!(resolve_live_parent(&config, &mock, toplevel).is_none());
+    }
+
+    #[test]
+    fn resolve_live_parent_after_restore_matches() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
+
+        let snap_path = toplevel
+            .join("@snapshots")
+            .join(info.id.snapshot_name("@", "default"));
+        simulate_restore(&mock, &toplevel.join("@"), &snap_path, "20260320-000000");
+
+        let parent = resolve_live_parent(&config, &mock, toplevel).expect("should resolve");
+        assert_eq!(parent.id, info.id);
+        assert_eq!(parent.strain, "default");
+    }
+
+    #[test]
+    fn resolve_live_parent_returns_none_when_parent_snapshot_deleted() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
+        let snap_path = toplevel
+            .join("@snapshots")
+            .join(info.id.snapshot_name("@", "default"));
+        simulate_restore(&mock, &toplevel.join("@"), &snap_path, "20260320-000000");
+
+        // Parent snapshot is subsequently removed.
+        delete_snapshot(&config, &mock, toplevel, &info).unwrap();
+
+        assert!(resolve_live_parent(&config, &mock, toplevel).is_none());
+    }
+
+    #[test]
+    fn resolve_live_parent_picks_correct_strain() {
+        let config = config_two_strains(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        // Take one snapshot per strain, then restore from the periodic one.
+        let default_snap = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            None,
+            Trigger::default(),
+        )
+        .unwrap();
+        // Different timestamp so the two snapshots never collide.
+        let periodic_name = "@-periodic-20260316-150000";
+        mock.seed_subvolume(toplevel.join("@snapshots").join(periodic_name));
+        // Make its parent_uuid point at live @ so create_writable_snapshot
+        // later produces a realistic parent relationship. The seed above
+        // gave it a fresh uuid; we only need *its* uuid to match against
+        // the restored live subvol.
+        let periodic_path = toplevel.join("@snapshots").join(periodic_name);
+
+        simulate_restore(
+            &mock,
+            &toplevel.join("@"),
+            &periodic_path,
+            "20260320-000000",
+        );
+
+        let parent = resolve_live_parent(&config, &mock, toplevel).expect("should resolve");
+        assert_eq!(parent.strain, "periodic");
+        assert_eq!(parent.id.as_str(), "20260316-150000");
+        // Sanity: default snapshot exists but is not the live parent.
+        assert_ne!(parent.id, default_snap.id);
     }
 
     #[test]

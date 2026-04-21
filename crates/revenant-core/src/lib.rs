@@ -20,4 +20,4 @@ pub use backend::{FileSystemBackend, SubvolumeInfo};
 pub use bootloader::BootloaderBackend;
 pub use config::{Config, DELETE_STRAIN, RetainConfig, StrainConfig};
 pub use error::{Result, RevenantError};
-pub use snapshot::{SnapshotId, SnapshotInfo};
+pub use snapshot::{LiveParentRef, SnapshotId, SnapshotInfo};

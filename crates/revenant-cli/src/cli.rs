@@ -109,6 +109,13 @@ pub enum Command {
         /// itself, this overrides safety guards around the live system.
         #[arg(long)]
         force: bool,
+        /// Snapshot the current state into the target strain (as a
+        /// manual-triggered snapshot) before replacing it, so the user
+        /// has a named, retained copy to return to if the restore turns
+        /// out to be unwanted. Equivalent to running `revenantctl
+        /// snapshot --strain <target-strain>` just before `restore`.
+        #[arg(long)]
+        save_current: bool,
     },
     /// Delete a snapshot (or all snapshots of a strain with --strain and --all)
     Delete {

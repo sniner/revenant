@@ -442,6 +442,10 @@ struct RestoreRefusalOutput<'a> {
 #[derive(Serialize)]
 struct RestoreSuccessOutput<'a> {
     restored: RestoreRef<'a>,
+    /// The snapshot taken of the pre-restore state when the caller
+    /// passed `--save-current`.  Omitted when the flag was not used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pre_restore_snapshot: Option<RestoreRef<'a>>,
     reboot_required: bool,
 }
 
@@ -493,25 +497,41 @@ pub fn print_restore_refusal(
     );
     eprintln!("(or the next restore), so they can serve as a volatile undo buffer for the");
     eprintln!("previous live state.  No automatic pre-restore snapshot is created any more —");
-    eprintln!("if you want a retained, strain-integrated copy of the current state, run");
-    eprintln!("`revenantctl snapshot` before this command.");
+    eprintln!("pass --save-current to snapshot the current state into the target strain");
+    eprintln!("as part of this restore, or run `revenantctl snapshot` beforehand.");
     eprintln!();
     eprintln!("Re-run with --yes to proceed.");
 }
 
 /// Render the completion message after a successful restore.
-pub fn print_restore_success(mode: OutputMode, snap: &SnapshotInfo) {
+///
+/// `pre_restore` is `Some` when `--save-current` created a snapshot of
+/// the previous state; callers pass `None` otherwise.  Both modes
+/// surface the pre-restore snapshot so the user can see where to
+/// return to if they change their mind.
+pub fn print_restore_success(
+    mode: OutputMode,
+    snap: &SnapshotInfo,
+    pre_restore: Option<&SnapshotInfo>,
+) {
     if mode.is_json() {
         emit_json(&RestoreSuccessOutput {
             restored: RestoreRef {
                 id: &snap.id,
                 strain: &snap.strain,
             },
+            pre_restore_snapshot: pre_restore.map(|p| RestoreRef {
+                id: &p.id,
+                strain: &p.strain,
+            }),
             reboot_required: true,
         });
         return;
     }
 
+    if let Some(p) = pre_restore {
+        println!("Pre-restore snapshot: {} (strain: {})", p.id, p.strain);
+    }
     println!("Restore complete. Please reboot to apply changes.");
 }
 
@@ -994,6 +1014,7 @@ mod tests {
                 id: &snap.id,
                 strain: &snap.strain,
             },
+            pre_restore_snapshot: None,
             reboot_required: true,
         };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
@@ -1003,6 +1024,50 @@ mod tests {
                 "restored": {"id": "20260411-080000", "strain": "default"},
                 "reboot_required": true,
             })
+        );
+    }
+
+    #[test]
+    fn restore_success_json_includes_pre_snapshot() {
+        let snap = sample_snapshot("20260411-080000", "default", false);
+        let pre = sample_snapshot("20260411-075500", "default", false);
+        let out = RestoreSuccessOutput {
+            restored: RestoreRef {
+                id: &snap.id,
+                strain: &snap.strain,
+            },
+            pre_restore_snapshot: Some(RestoreRef {
+                id: &pre.id,
+                strain: &pre.strain,
+            }),
+            reboot_required: true,
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        assert_eq!(
+            got,
+            json!({
+                "restored": {"id": "20260411-080000", "strain": "default"},
+                "pre_restore_snapshot": {"id": "20260411-075500", "strain": "default"},
+                "reboot_required": true,
+            })
+        );
+    }
+
+    #[test]
+    fn restore_success_json_omits_pre_snapshot_when_none() {
+        let snap = sample_snapshot("20260411-080000", "default", false);
+        let out = RestoreSuccessOutput {
+            restored: RestoreRef {
+                id: &snap.id,
+                strain: &snap.strain,
+            },
+            pre_restore_snapshot: None,
+            reboot_required: true,
+        };
+        let s = to_json_string(&out);
+        assert!(
+            !s.contains("\"pre_restore_snapshot\""),
+            "pre_restore_snapshot should be omitted when None, got: {s}"
         );
     }
 

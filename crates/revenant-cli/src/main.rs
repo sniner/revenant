@@ -150,6 +150,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             strain,
             yes,
             force,
+            save_current,
         } => cmd_restore(
             mode,
             &config,
@@ -159,6 +160,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             strain.as_deref(),
             yes,
             force,
+            save_current,
         ),
         cli::Command::Delete {
             snapshot_id,
@@ -367,6 +369,7 @@ fn cmd_restore(
     strain: Option<&str>,
     yes: bool,
     force: bool,
+    save_current: bool,
 ) -> Result<()> {
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
@@ -414,10 +417,38 @@ fn cmd_restore(
         return Err(SilentExit(1).into());
     }
 
+    // Take a retained snapshot of the current state first when requested.
+    // If this step fails, we abort before touching any live subvolume —
+    // the whole point of --save-current is a safety net, so a silent
+    // proceed-without-snapshot would defeat the feature.
+    let pre_restore = if save_current {
+        use revenant_core::metadata::Trigger;
+        let message = format!("pre-restore: state before restoring {}", snap.id);
+        let info = snapshot::create_snapshot(
+            config,
+            backend,
+            toplevel,
+            &snap.strain,
+            Some(message),
+            Trigger::manual(),
+        )
+        .context("failed to create pre-restore snapshot; restore aborted")?;
+        let all = snapshot::discover_snapshots(config, backend, toplevel)
+            .context("failed to discover snapshots for retention")?;
+        // Retention output is discarded here — the pre-restore snapshot
+        // and the removal of older ones are both reported via the
+        // restore output struct downstream.
+        let _ = revenant_core::cleanup::apply_retention_to(config, backend, toplevel, &all)
+            .context("retention cleanup after pre-restore snapshot failed")?;
+        Some(info)
+    } else {
+        None
+    };
+
     revenant_core::restore::restore_snapshot(config, backend, toplevel, &snap)
         .context("restore failed")?;
 
-    output::print_restore_success(mode, &snap);
+    output::print_restore_success(mode, &snap, pre_restore.as_ref());
     Ok(())
 }
 

@@ -68,10 +68,13 @@ Alongside each snapshot, revenant writes an optional TOML sidecar
 *why* the snapshot exists:
 
 - A free-form `--message` supplied by the user on manual snapshots.
-- The trigger kind (`manual`, `pacman`, `systemd-boot`, `systemd-periodic`).
+- The trigger kind (`manual`, `pacman`, `systemd-boot`, `systemd-periodic`,
+  `restore`).
 - For pacman-triggered snapshots, the list of target packages read from
   the hook's stdin.
 - For systemd-triggered snapshots, the unit that fired them.
+- For `restore`-triggered snapshots (created by `restore --save-current`
+  before the rollback), the id of the snapshot the restore was heading to.
 - A local-time `created_at` timestamp (so the sidecar is readable on its own,
   independent of the UTC id in the subvolume name).
 
@@ -116,9 +119,17 @@ subvolume is **not** purged immediately — it survives boot-time snapshots and
 periodic timer snapshots until the next `revenantctl cleanup` or the next
 restore. That makes it a volatile undo buffer for the previous live state: if
 you need a file from the pre-restore system after rebooting, it is still there,
-writable, at the top level of the btrfs filesystem. There is no automatic
-pre-restore safety snapshot — if you want a retained, strain-integrated copy of
-the current state, take a manual `revenantctl snapshot` before invoking restore.
+writable, at the top level of the btrfs filesystem. If you want a retained,
+strain-integrated copy of the current state instead of (or in addition to) the
+volatile DELETE marker, pass `--save-current` to `restore`: it captures the
+pre-restore state as a snapshot in the target strain (tagged with the `restore`
+trigger kind) just before the rollback, so you have a named, retention-managed
+point to return to.
+
+After a restore, `revenantctl list` marks the snapshot that the current live
+subvolume was cloned from with a leading `*`, so the rollback anchor is always
+visible in the snapshot listing. In JSON mode the same information is exposed
+as an optional top-level `live_parent` field alongside `snapshots`.
 
 ### EFI backup strategy
 
@@ -195,11 +206,11 @@ The rough shape per command is:
 
 | Command | JSON payload |
 |---|---|
-| `list` | `{"snapshots": [{"id","strain","subvolumes","efi_synced","metadata"?}, …]}` |
+| `list` | `{"snapshots": [{"id","strain","subvolumes","efi_synced","metadata"?}, …], "live_parent"?: {"id","strain"}}` |
 | `status` | `{"config": {…}, "strain_snapshots": {name: count}, "snapshots_total": N}` |
 | `snapshot` | `{"created": SnapshotInfo, "retention_removed": [id, …]}` |
 | `delete` | `{"strain": "…", "deleted": [id, …]}` |
-| `restore` (`--yes`) | `{"restored": {"id","strain"}, "reboot_required": true}` |
+| `restore` (`--yes`) | `{"restored": {"id","strain"}, "pre_restore_snapshot"?: {"id","strain"}, "reboot_required": true}` |
 | `restore` (refusal) | `{"would_restore": {…}, "subvolumes": […], "efi_sync": bool, "proceed_with": "--yes"}`, exit 1 |
 | `cleanup` | `{"removed": [id, …], "removed_sidecars": [name, …]}` |
 | `cleanup --dry-run` | the full `RetentionPlan` — per-strain keep/delete entries plus any DELETE markers |

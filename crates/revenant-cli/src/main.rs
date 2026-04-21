@@ -359,7 +359,8 @@ fn cmd_list(
             .collect(),
         None => snapshots,
     };
-    output::print_snapshot_list(mode, &filtered);
+    let live_parent = snapshot::resolve_live_parent(config, backend, toplevel);
+    output::print_snapshot_list(mode, &filtered, live_parent.as_ref());
     Ok(())
 }
 

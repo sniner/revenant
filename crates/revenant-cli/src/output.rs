@@ -15,7 +15,7 @@ use revenant_core::check::{Finding, Severity};
 use revenant_core::cleanup::{CleanupSummary, PlanAction, RetentionPlan};
 use revenant_core::config::RetainConfig;
 use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
-use revenant_core::snapshot::SnapshotId;
+use revenant_core::snapshot::{LiveParentRef, SnapshotId};
 use revenant_core::{Config, SnapshotInfo};
 
 use crate::cli::OutputMode;
@@ -131,12 +131,28 @@ fn metadata_summary(meta: &SnapshotMetadata) -> String {
 #[derive(Serialize)]
 struct SnapshotListOutput<'a> {
     snapshots: &'a [SnapshotInfo],
+    /// The snapshot the currently live rootfs subvolume was cloned
+    /// from, if known. Rendered as a leading `*` marker in text mode;
+    /// a `{id, strain}` object in JSON mode. Omitted entirely (both
+    /// modes) when the live state has no resolvable parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_parent: Option<&'a LiveParentRef>,
 }
 
-/// Render a list of snapshot records.
-pub fn print_snapshot_list(mode: OutputMode, snapshots: &[SnapshotInfo]) {
+/// Render a list of snapshot records. `live_parent` marks the snapshot
+/// the current live rootfs was restored from (see
+/// [`revenant_core::snapshot::resolve_live_parent`]); pass `None` when
+/// the system is pristine or the anchor could not be resolved.
+pub fn print_snapshot_list(
+    mode: OutputMode,
+    snapshots: &[SnapshotInfo],
+    live_parent: Option<&LiveParentRef>,
+) {
     if mode.is_json() {
-        emit_json(&SnapshotListOutput { snapshots });
+        emit_json(&SnapshotListOutput {
+            snapshots,
+            live_parent,
+        });
         return;
     }
 
@@ -145,15 +161,23 @@ pub fn print_snapshot_list(mode: OutputMode, snapshots: &[SnapshotInfo]) {
         return;
     }
 
-    println!("{:<17} {:<12} Description", "ID", "Strain");
-    println!("{}", "-".repeat(60));
+    let is_live_parent = |snap: &SnapshotInfo| matches!(live_parent, Some(lp) if lp.id == snap.id && lp.strain == snap.strain);
+
+    // Leading 2-char column ("* " or "  ") keeps the rest of the table
+    // aligned whether or not an anchor snapshot is present in the view.
+    println!("  {:<17} {:<12} Description", "ID", "Strain");
+    println!("{}", "-".repeat(62));
 
     for snap in snapshots {
+        let marker = if is_live_parent(snap) { '*' } else { ' ' };
         let description = snap
             .metadata
             .as_ref()
             .map_or_else(|| "—".to_string(), metadata_summary);
-        println!("{:<17} {:<12} {}", snap.id, snap.strain, description);
+        println!(
+            "{marker} {:<17} {:<12} {}",
+            snap.id, snap.strain, description
+        );
     }
 }
 
@@ -814,7 +838,10 @@ mod tests {
     #[test]
     fn list_json_shape() {
         let snaps = vec![sample_snapshot("20260411-080000", "default", true)];
-        let out = SnapshotListOutput { snapshots: &snaps };
+        let out = SnapshotListOutput {
+            snapshots: &snaps,
+            live_parent: None,
+        };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         assert_eq!(
             got,
@@ -831,7 +858,10 @@ mod tests {
 
     #[test]
     fn list_json_empty() {
-        let out = SnapshotListOutput { snapshots: &[] };
+        let out = SnapshotListOutput {
+            snapshots: &[],
+            live_parent: None,
+        };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         assert_eq!(got, json!({ "snapshots": [] }));
     }
@@ -846,6 +876,7 @@ mod tests {
         ));
         let out = SnapshotListOutput {
             snapshots: std::slice::from_ref(&snap),
+            live_parent: None,
         };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         let meta = &got["snapshots"][0]["metadata"];
@@ -862,11 +893,44 @@ mod tests {
         let snap = sample_snapshot("20260411-080000", "default", false);
         let out = SnapshotListOutput {
             snapshots: std::slice::from_ref(&snap),
+            live_parent: None,
         };
         let s = to_json_string(&out);
         assert!(
             !s.contains("\"metadata\""),
             "metadata field should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn list_json_includes_live_parent_when_set() {
+        let snap = sample_snapshot("20260411-080000", "default", false);
+        let lp = LiveParentRef {
+            id: SnapshotId::from_string("20260411-080000").unwrap(),
+            strain: "default".into(),
+        };
+        let out = SnapshotListOutput {
+            snapshots: std::slice::from_ref(&snap),
+            live_parent: Some(&lp),
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        assert_eq!(
+            got["live_parent"],
+            json!({"id": "20260411-080000", "strain": "default"})
+        );
+    }
+
+    #[test]
+    fn list_json_omits_live_parent_when_none() {
+        let snap = sample_snapshot("20260411-080000", "default", false);
+        let out = SnapshotListOutput {
+            snapshots: std::slice::from_ref(&snap),
+            live_parent: None,
+        };
+        let s = to_json_string(&out);
+        assert!(
+            !s.contains("\"live_parent\""),
+            "live_parent should be omitted when None, got: {s}"
         );
     }
 

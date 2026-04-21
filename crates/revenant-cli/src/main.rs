@@ -283,6 +283,10 @@ fn build_trigger(
         TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => {
             Trigger::systemd(kind, trigger_unit)
         }
+        // Restore is created internally by the --save-current path and
+        // is not selectable via the CLI `--trigger` flag (see
+        // `cli::TriggerKindArg`), so this arm is unreachable in practice.
+        TriggerKind::Restore => unreachable!("Restore trigger is not CLI-selectable"),
     }
 }
 
@@ -423,14 +427,13 @@ fn cmd_restore(
     // proceed-without-snapshot would defeat the feature.
     let pre_restore = if save_current {
         use revenant_core::metadata::Trigger;
-        let message = format!("pre-restore: state before restoring {}", snap.id);
         let info = snapshot::create_snapshot(
             config,
             backend,
             toplevel,
             &snap.strain,
-            Some(message),
-            Trigger::manual(),
+            None,
+            Trigger::restore(snap.id.to_string()),
         )
         .context("failed to create pre-restore snapshot; restore aborted")?;
         let all = snapshot::discover_snapshots(config, backend, toplevel)

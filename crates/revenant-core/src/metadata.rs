@@ -40,6 +40,7 @@ pub enum TriggerKind {
     Pacman,
     SystemdBoot,
     SystemdPeriodic,
+    Restore,
     #[default]
     Unknown,
 }
@@ -60,6 +61,16 @@ pub struct SystemdTrigger {
     pub unit: Option<String>,
 }
 
+/// Restore-specific trigger context.  Set on pre-restore safety snapshots
+/// created via `revenantctl restore --save-current`; carries the id of the
+/// snapshot that was about to be restored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreTrigger {
+    /// Id of the snapshot being restored when this pre-restore snapshot was taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
 /// Structured trigger information for a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trigger {
@@ -68,6 +79,8 @@ pub struct Trigger {
     pub pacman: Option<PacmanTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub systemd: Option<SystemdTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<RestoreTrigger>,
 }
 
 impl Default for Trigger {
@@ -76,6 +89,7 @@ impl Default for Trigger {
             kind: TriggerKind::Unknown,
             pacman: None,
             systemd: None,
+            restore: None,
         }
     }
 }
@@ -94,7 +108,7 @@ impl Trigger {
         Self {
             kind: TriggerKind::Pacman,
             pacman: Some(PacmanTrigger { targets }),
-            systemd: None,
+            ..Self::default()
         }
     }
 
@@ -106,8 +120,19 @@ impl Trigger {
         ));
         Self {
             kind,
-            pacman: None,
             systemd: Some(SystemdTrigger { unit }),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn restore(target: String) -> Self {
+        Self {
+            kind: TriggerKind::Restore,
+            restore: Some(RestoreTrigger {
+                target: Some(target),
+            }),
+            ..Self::default()
         }
     }
 }
@@ -419,6 +444,27 @@ mod tests {
                 .and_then(|s| s.unit.as_deref()),
             Some("revenant-boot.service")
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn round_trip_restore_with_target() {
+        let dir = tmpdir();
+        let path = dir.join("r.meta.toml");
+        let meta = SnapshotMetadata::new(None, Trigger::restore("20260420-230031".into()));
+        write(&path, &meta).unwrap();
+        let loaded = read(&path).unwrap().unwrap();
+        assert_eq!(loaded.trigger.kind, TriggerKind::Restore);
+        assert_eq!(
+            loaded
+                .trigger
+                .restore
+                .as_ref()
+                .and_then(|r| r.target.as_deref()),
+            Some("20260420-230031")
+        );
+        assert!(loaded.trigger.pacman.is_none());
+        assert!(loaded.trigger.systemd.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 

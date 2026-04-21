@@ -80,6 +80,7 @@ fn metadata_summary(meta: &SnapshotMetadata) -> String {
         TriggerKind::Pacman => "pacman",
         TriggerKind::SystemdBoot => "systemd-boot",
         TriggerKind::SystemdPeriodic => "systemd-periodic",
+        TriggerKind::Restore => "pre-restore",
         TriggerKind::Unknown => "unknown",
     };
 
@@ -105,6 +106,12 @@ fn metadata_summary(meta: &SnapshotMetadata) -> String {
             .as_ref()
             .and_then(|s| s.unit.as_deref())
             .map_or_else(String::new, |u| format!(" ({u})")),
+        TriggerKind::Restore => meta
+            .trigger
+            .restore
+            .as_ref()
+            .and_then(|r| r.target.as_deref())
+            .map_or_else(String::new, |t| format!(": {t}")),
         _ => String::new(),
     };
 
@@ -888,6 +895,14 @@ mod tests {
         let s = metadata_summary(&meta);
         assert!(s.contains("pacman"));
         assert!(s.contains("a, b, +3"));
+    }
+
+    #[test]
+    fn metadata_summary_restore_shows_target_id() {
+        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        let meta = SnapshotMetadata::new(None, Trigger::restore("20260420-230031".into()));
+        let s = metadata_summary(&meta);
+        assert_eq!(s, "pre-restore: 20260420-230031");
     }
 
     #[test]

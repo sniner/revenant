@@ -153,11 +153,15 @@ impl FileSystemBackend for BtrfsBackend {
         let info = ioctl::get_subvol_info(fd.as_fd(), path)?;
         let flags = ioctl::get_flags(fd.as_fd(), path)?;
 
+        let parent = Uuid::from_bytes(info.parent_uuid);
+        let parent_uuid = (!parent.is_nil()).then_some(parent);
+
         Ok(SubvolumeInfo {
             id: info.treeid,
             parent_id: info.parent_id,
             path: path.to_path_buf(),
             uuid: Uuid::from_bytes(info.uuid),
+            parent_uuid,
             readonly: flags & ioctl::BTRFS_SUBVOL_RDONLY != 0,
         })
     }

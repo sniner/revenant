@@ -17,6 +17,12 @@ pub struct SubvolumeInfo {
     pub parent_id: u64,
     pub path: std::path::PathBuf,
     pub uuid: Uuid,
+    /// uuid of the subvolume this one was cloned from, if any. btrfs
+    /// stores a nil uuid for subvolumes created from scratch (not
+    /// snapshotted); we normalise that to `None` so downstream code
+    /// doesn't have to know the convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<Uuid>,
     pub readonly: bool,
 }
 

@@ -28,6 +28,9 @@ use crate::error::{Result, RevenantError};
 struct MockSubvol {
     id: u64,
     uuid: Uuid,
+    /// Mirrors btrfs: `Some(uuid)` when the subvolume was created by
+    /// snapshotting another subvolume, `None` otherwise.
+    parent_uuid: Option<Uuid>,
     readonly: bool,
 }
 
@@ -66,6 +69,7 @@ impl MockState {
             parent_id: 5,
             path: path.to_path_buf(),
             uuid: sv.uuid,
+            parent_uuid: sv.parent_uuid,
             readonly: sv.readonly,
         }
     }
@@ -96,6 +100,7 @@ impl MockBackend {
             MockSubvol {
                 id,
                 uuid: Uuid::new_v4(),
+                parent_uuid: None,
                 readonly: false,
             },
         );
@@ -158,19 +163,21 @@ impl FileSystemBackend for MockBackend {
 
     fn create_readonly_snapshot(&self, source: &Path, dest: &Path) -> Result<SubvolumeInfo> {
         let mut state = self.state.lock().unwrap();
-        if !state.subvols.contains_key(source) {
+        let Some(src) = state.subvols.get(source) else {
             return Err(RevenantError::SubvolumeNotFound(source.to_path_buf()));
-        }
+        };
         if state.subvols.contains_key(dest) {
             return Err(RevenantError::Other(format!(
                 "destination already exists: {}",
                 dest.display()
             )));
         }
+        let parent_uuid = Some(src.uuid);
         let id = state.alloc_id();
         let sv = MockSubvol {
             id,
             uuid: Uuid::new_v4(),
+            parent_uuid,
             readonly: true,
         };
         state.subvols.insert(dest.to_path_buf(), sv.clone());
@@ -179,19 +186,21 @@ impl FileSystemBackend for MockBackend {
 
     fn create_writable_snapshot(&self, source: &Path, dest: &Path) -> Result<SubvolumeInfo> {
         let mut state = self.state.lock().unwrap();
-        if !state.subvols.contains_key(source) {
+        let Some(src) = state.subvols.get(source) else {
             return Err(RevenantError::SubvolumeNotFound(source.to_path_buf()));
-        }
+        };
         if state.subvols.contains_key(dest) {
             return Err(RevenantError::Other(format!(
                 "destination already exists: {}",
                 dest.display()
             )));
         }
+        let parent_uuid = Some(src.uuid);
         let id = state.alloc_id();
         let sv = MockSubvol {
             id,
             uuid: Uuid::new_v4(),
+            parent_uuid,
             readonly: false,
         };
         state.subvols.insert(dest.to_path_buf(), sv.clone());
@@ -212,6 +221,7 @@ impl FileSystemBackend for MockBackend {
             MockSubvol {
                 id,
                 uuid: Uuid::new_v4(),
+                parent_uuid: None,
                 readonly: false,
             },
         );
@@ -362,6 +372,24 @@ mod tests {
             .unwrap();
         let info = mock.subvolume_info(Path::new("/top/@-snap")).unwrap();
         assert!(info.readonly);
+    }
+
+    #[test]
+    fn snapshot_records_parent_uuid() {
+        let mock = MockBackend::new();
+        mock.create_subvolume(Path::new("/top/@")).unwrap();
+        let src = mock.subvolume_info(Path::new("/top/@")).unwrap();
+        assert!(src.parent_uuid.is_none());
+
+        mock.create_readonly_snapshot(Path::new("/top/@"), Path::new("/top/@-ro"))
+            .unwrap();
+        let ro = mock.subvolume_info(Path::new("/top/@-ro")).unwrap();
+        assert_eq!(ro.parent_uuid, Some(src.uuid));
+
+        mock.create_writable_snapshot(Path::new("/top/@-ro"), Path::new("/top/@-rw"))
+            .unwrap();
+        let rw = mock.subvolume_info(Path::new("/top/@-rw")).unwrap();
+        assert_eq!(rw.parent_uuid, Some(ro.uuid));
     }
 
     #[test]

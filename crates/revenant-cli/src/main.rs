@@ -20,6 +20,20 @@ use crate::cli::OutputMode;
 use crate::output::{InitReporter, InitTask};
 
 fn main() {
+    // Restore the default SIGPIPE handler. Rust ignores SIGPIPE by
+    // default, which turns writes to a closed pipe into `EPIPE` errors
+    // that `println!` converts into a panic — visible to the user as
+    // `failed printing to stdout: Broken pipe`. Resetting to `SIG_DFL`
+    // makes the process die silently by signal when the downstream
+    // reader goes away, matching what every other Unix tool does.
+    // SAFETY: called once before any other thread exists.
+    unsafe {
+        let _ = nix::sys::signal::signal(
+            nix::sys::signal::Signal::SIGPIPE,
+            nix::sys::signal::SigHandler::SigDfl,
+        );
+    }
+
     let cli = cli::Cli::parse();
 
     let mode = if cli.json {
@@ -192,6 +206,20 @@ fn mount_toplevel(config: &Config) -> Result<std::path::PathBuf> {
     let mount_point = std::env::temp_dir().join("revenant-toplevel");
     std::fs::create_dir_all(&mount_point).context("failed to create temporary mount point")?;
 
+    // Self-heal after a previous invocation that died before the
+    // matching `unmount_toplevel` ran (e.g. SIGPIPE from a broken
+    // stdout pipe). A leftover mount at our temp location would
+    // otherwise make the btrfs `mount` below fail with EBUSY.
+    if is_mount_point(&mount_point) {
+        tracing::warn!(
+            "stale mount at {} from a previous run; unmounting",
+            mount_point.display()
+        );
+        if let Err(e) = nix::mount::umount(&mount_point) {
+            tracing::warn!("failed to unmount stale {}: {e}", mount_point.display());
+        }
+    }
+
     let device = format!("/dev/disk/by-uuid/{}", config.sys.rootfs.device_uuid);
 
     nix::mount::mount(
@@ -205,6 +233,22 @@ fn mount_toplevel(config: &Config) -> Result<std::path::PathBuf> {
 
     tracing::debug!("mounted top-level at {}", mount_point.display());
     Ok(mount_point)
+}
+
+/// Return `true` when `path` sits on a different filesystem than its
+/// parent directory — the classic stat-based mount-point check. Any
+/// stat error (missing parent, missing path) is treated as "not a
+/// mount point" so the caller falls through to a normal mount attempt.
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let (Ok(self_meta), Ok(parent_meta)) = (std::fs::metadata(path), std::fs::metadata(parent))
+    else {
+        return false;
+    };
+    self_meta.dev() != parent_meta.dev()
 }
 
 fn unmount_toplevel(mount_point: &Path) {

@@ -4,14 +4,19 @@
 //! 1. Mount lifecycle + `GetVersion` / `GetDaemonInfo`.
 //! 2. Read-only path: `ListStrains`, `GetStrain`, `ListSnapshots`,
 //!    `GetSnapshot`, `GetLiveParent`.
+//! 3. Inotify watchers + `SnapshotsChanged` / `StrainConfigChanged`.
+//! 4. `SetStrainRetention` with polkit + atomic config edit.
+//! 5. `CreateSnapshot` / `DeleteSnapshot`, both synchronous.
 //!
-//! Privileged write-paths (`SetStrainRetention`, `CreateSnapshot`,
-//! `DeleteSnapshot`, `Restore`) are still stubs. See
-//! `docs/design/dbus-interface.md`.
+//! `Restore` is still stubbed. See `docs/design/dbus-interface.md`.
 
 use std::sync::Arc;
 
-use revenant_core::snapshot::{discover_snapshots, find_snapshot, resolve_live_parent};
+use revenant_core::metadata::Trigger;
+use revenant_core::snapshot::{
+    create_snapshot as core_create_snapshot, delete_snapshot as core_delete_snapshot,
+    discover_snapshots, find_snapshot, resolve_live_parent,
+};
 use revenant_core::{RetainConfig, RevenantError, SnapshotId};
 use zbus::{fdo, interface};
 use zvariant::OwnedObjectPath;
@@ -164,12 +169,69 @@ impl Daemon {
         snapshot_to_dict(&snap, live.as_ref())
     }
 
-    async fn create_snapshot(&self, _strain: &str, _message: &str) -> fdo::Result<OwnedObjectPath> {
-        Err(not_implemented("CreateSnapshot"))
+    async fn create_snapshot(
+        &self,
+        strain: &str,
+        message: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<Dict> {
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+        polkit::check(conn, sender.as_str(), "org.revenant.snapshot.create").await?;
+
+        let ready = self.state.ready().await?;
+        let msg = if message.is_empty() {
+            None
+        } else {
+            Some(message.to_string())
+        };
+        let info = core_create_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            strain,
+            msg,
+            Trigger::manual(),
+        )
+        .map_err(map_core_error)?;
+
+        let live = resolve_live_parent(ready.config(), &self.state.backend, ready.toplevel());
+        snapshot_to_dict(&info, live.as_ref())
     }
 
-    async fn delete_snapshot(&self, _strain: &str, _id: &str) -> fdo::Result<OwnedObjectPath> {
-        Err(not_implemented("DeleteSnapshot"))
+    async fn delete_snapshot(
+        &self,
+        strain: &str,
+        id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<()> {
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+        polkit::check(conn, sender.as_str(), "org.revenant.snapshot.delete").await?;
+
+        let ready = self.state.ready().await?;
+        let snap_id = SnapshotId::from_string(id)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+        let snapshot = find_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snap_id,
+            Some(strain),
+        )
+        .map_err(map_core_error)?;
+        core_delete_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snapshot,
+        )
+        .map_err(map_core_error)?;
+        Ok(())
     }
 
     // -- Live state ----------------------------------------------------

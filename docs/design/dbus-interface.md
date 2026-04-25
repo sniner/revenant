@@ -141,9 +141,17 @@ remains a config-file edit.
 ```text
 ListSnapshots(filter: a{sv}) -> (aa{sv})        -- filter: optional {"strain": s}
 GetSnapshot(strain: s, id: s) -> (a{sv})
-CreateSnapshot(strain: s, message: s) -> (o)    -- privileged: org.revenant.snapshot.create
-DeleteSnapshot(strain: s, id: s) -> (o)         -- privileged: org.revenant.snapshot.delete
+CreateSnapshot(strain: s, message: s) -> (a{sv}) -- privileged: org.revenant.snapshot.create
+                                                 --   returns the new Snapshot dict
+DeleteSnapshot(strain: s, id: s) -> ()          -- privileged: org.revenant.snapshot.delete
 ```
+
+`CreateSnapshot` and `DeleteSnapshot` complete well under a second
+on btrfs, so they return synchronously rather than going through the
+`OperationHandle` pattern. Pass the empty string as `message` to omit
+it. Both operations cause the inotify watcher to fire
+`SnapshotsChanged`, which is how unprivileged subscribers learn about
+the change — the methods do not emit anything themselves.
 
 ### Live state
 

@@ -1,6 +1,6 @@
 [package]
 name = "revenant-gui"
-description = "GUI frontend for the Revenant system snapshot tool (placeholder)"
+description = "GTK4/libadwaita GUI frontend for the Revenant system snapshot tool"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -8,5 +8,22 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[bin]]
+name = "revenant-gui"
+path = "src/main.rs"
+
 [dependencies]
 revenant-core = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zbus = { workspace = true }
+zvariant = { workspace = true }
+
+# GUI-only dependencies — kept local to this crate.
+gtk = { package = "gtk4", version = "0.9" }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }

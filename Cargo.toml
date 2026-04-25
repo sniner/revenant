@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/revenant-core",
     "crates/revenant-cli",
+    "crates/revenant-daemon",
     "crates/revenant-gui",
 ]
 
@@ -28,3 +29,8 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Shared by revenant-daemon (D-Bus server) and revenant-gui (D-Bus client).
+# Wire-protocol compatibility requires the same major version on both sides.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+zvariant = "5"

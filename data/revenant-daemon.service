@@ -1,0 +1,36 @@
+# systemd service unit for revenant-daemon.
+#
+# Installed to: /usr/lib/systemd/system/revenant-daemon.service
+#
+# Started on demand via D-Bus activation (see org.revenant.Daemon1.service).
+
+[Unit]
+Description=Revenant snapshot management daemon
+Documentation=https://github.com/sniner/revenant
+# Bus is required because we are dbus-activated.
+Requires=dbus.socket
+After=dbus.socket
+# We touch the btrfs toplevel; make sure /run is up.
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=dbus
+BusName=org.revenant.Daemon1
+ExecStart=/usr/bin/revenantd
+# The daemon mounts the btrfs toplevel under /run/revenant/; keep that
+# mount in our own private namespace so it does not leak into the host.
+PrivateMounts=true
+# Hardening (loose first; tighten as the implementation matures).
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=mnt
+# CAP_SYS_ADMIN: btrfs ioctls + mount(2). Drop everything else.
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+
+[Install]
+# Not enabled by default — D-Bus activation handles startup.
+# Listed here so distros that prefer manual enabling can do so.
+WantedBy=multi-user.target

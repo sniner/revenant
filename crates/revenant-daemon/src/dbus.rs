@@ -151,22 +151,23 @@ impl Daemon {
     // -- Signals -------------------------------------------------------
 
     #[zbus(signal)]
-    async fn snapshots_changed(
+    pub async fn snapshots_changed(
         ctxt: &zbus::object_server::SignalEmitter<'_>,
         strain: &str,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn strain_config_changed(
+    pub async fn strain_config_changed(
         ctxt: &zbus::object_server::SignalEmitter<'_>,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn live_parent_changed(ctxt: &zbus::object_server::SignalEmitter<'_>)
-    -> zbus::Result<()>;
+    pub async fn live_parent_changed(
+        ctxt: &zbus::object_server::SignalEmitter<'_>,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn daemon_state_changed(
+    pub async fn daemon_state_changed(
         ctxt: &zbus::object_server::SignalEmitter<'_>,
         state: &str,
         message: &str,

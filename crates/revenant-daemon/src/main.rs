@@ -3,6 +3,7 @@
 //! See `docs/design/dbus-interface.md` for the wire-level contract.
 
 mod dbus;
+mod marshal;
 mod mount;
 mod state;
 

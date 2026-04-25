@@ -2,11 +2,13 @@
 //!
 //! Holds the loaded config and the active toplevel mount guard. The
 //! D-Bus interface receives an `Arc<DaemonState>` and reads from it
-//! for all method handlers.
+//! for all method handlers. Write-paths will later acquire a mutex
+//! around the mutating sections; the current slice is read-only.
 
 use std::sync::Arc;
 
 use revenant_core::Config;
+use revenant_core::backend::btrfs::BtrfsBackend;
 
 use crate::mount::ToplevelMount;
 
@@ -23,6 +25,7 @@ pub enum DegradedReason {
 pub struct DaemonState {
     pub config: Option<Config>,
     pub toplevel: Option<ToplevelMount>,
+    pub backend: BtrfsBackend,
     pub degraded: Option<DegradedReason>,
 }
 
@@ -50,8 +53,23 @@ impl DaemonState {
         Arc::new(Self {
             config,
             toplevel: mount,
+            backend: BtrfsBackend::new(),
             degraded,
         })
+    }
+
+    /// Return `(config, toplevel-path)` for the read-path methods, or a
+    /// `BackendUnavailable` error if the daemon is degraded.
+    pub fn ready(&self) -> Result<(&Config, &std::path::Path), zbus::fdo::Error> {
+        match (&self.config, &self.toplevel) {
+            (Some(cfg), Some(mount)) => Ok((cfg, mount.path())),
+            _ => Err(zbus::fdo::Error::Failed(format!(
+                "backend unavailable: {}",
+                self.degraded
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), ToString::to_string)
+            ))),
+        }
     }
 
     pub fn backend_name(&self) -> &'static str {

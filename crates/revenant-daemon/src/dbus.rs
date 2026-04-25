@@ -1,22 +1,25 @@
 //! D-Bus interface implementation for `org.revenant.Daemon1`.
 //!
-//! Slice 1 wires up read-only metadata (`GetVersion`, `GetDaemonInfo`)
-//! against the live [`DaemonState`]. Everything else still returns
-//! `NotImplemented`. See `docs/design/dbus-interface.md`.
+//! Slices implemented so far:
+//! 1. Mount lifecycle + `GetVersion` / `GetDaemonInfo`.
+//! 2. Read-only path: `ListStrains`, `GetStrain`, `ListSnapshots`,
+//!    `GetSnapshot`, `GetLiveParent`.
+//!
+//! Privileged write-paths (`SetStrainRetention`, `CreateSnapshot`,
+//! `DeleteSnapshot`, `Restore`) are still stubs. See
+//! `docs/design/dbus-interface.md`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use revenant_core::snapshot::{discover_snapshots, find_snapshot, resolve_live_parent};
+use revenant_core::{RevenantError, SnapshotId};
 use zbus::{fdo, interface};
-use zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zvariant::OwnedObjectPath;
 
+use crate::marshal::{
+    self, Dict, StrainTuple, live_parent_to_dict, snapshot_to_dict, strain_to_tuple,
+};
 use crate::state::DaemonState;
-
-/// Extensible-dict D-Bus type. `a{sv}` on the wire.
-type Dict = HashMap<String, OwnedValue>;
-
-/// Strain wire type — `(sasba{sv})`.
-type StrainTuple = (String, Vec<String>, bool, Dict);
 
 pub struct Daemon {
     state: Arc<DaemonState>,
@@ -38,18 +41,18 @@ impl Daemon {
 
     async fn get_daemon_info(&self) -> fdo::Result<Dict> {
         let mut out = Dict::new();
-        insert_str(&mut out, "version", env!("CARGO_PKG_VERSION"))?;
-        insert_str(&mut out, "backend", self.state.backend_name())?;
-        insert_bool(&mut out, "toplevel_mounted", self.state.toplevel.is_some())?;
+        marshal::insert_str(&mut out, "version", env!("CARGO_PKG_VERSION"))?;
+        marshal::insert_str(&mut out, "backend", self.state.backend_name())?;
+        marshal::insert_bool(&mut out, "toplevel_mounted", self.state.toplevel.is_some())?;
 
         if let Some(mount) = &self.state.toplevel {
-            insert_str(&mut out, "toplevel_path", &mount.path().to_string_lossy())?;
+            marshal::insert_str(&mut out, "toplevel_path", &mount.path().to_string_lossy())?;
         }
         if let Some(cfg) = &self.state.config {
-            insert_str(&mut out, "device_uuid", &cfg.sys.rootfs.device_uuid)?;
+            marshal::insert_str(&mut out, "device_uuid", &cfg.sys.rootfs.device_uuid)?;
         }
         if let Some(reason) = &self.state.degraded {
-            insert_str(&mut out, "degraded_reason", &reason.to_string())?;
+            marshal::insert_str(&mut out, "degraded_reason", &reason.to_string())?;
         }
         Ok(out)
     }
@@ -57,11 +60,24 @@ impl Daemon {
     // -- Strains -------------------------------------------------------
 
     async fn list_strains(&self) -> fdo::Result<Vec<StrainTuple>> {
-        Err(not_implemented("ListStrains"))
+        let (cfg, _toplevel) = self.state.ready()?;
+        let mut out: Vec<StrainTuple> = cfg
+            .strain
+            .iter()
+            .map(|(name, sc)| strain_to_tuple(name, sc))
+            .collect::<fdo::Result<_>>()?;
+        // Stable order so clients don't have to re-sort.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 
-    async fn get_strain(&self, _name: &str) -> fdo::Result<StrainTuple> {
-        Err(not_implemented("GetStrain"))
+    async fn get_strain(&self, name: &str) -> fdo::Result<StrainTuple> {
+        let (cfg, _toplevel) = self.state.ready()?;
+        let sc = cfg
+            .strain
+            .get(name)
+            .ok_or_else(|| fdo::Error::Failed(format!("unknown strain: {name}")))?;
+        strain_to_tuple(name, sc)
     }
 
     async fn set_strain_retention(&self, _name: &str, _retention: Dict) -> fdo::Result<()> {
@@ -70,12 +86,35 @@ impl Daemon {
 
     // -- Snapshots -----------------------------------------------------
 
-    async fn list_snapshots(&self, _filter: Dict) -> fdo::Result<Vec<Dict>> {
-        Err(not_implemented("ListSnapshots"))
+    async fn list_snapshots(&self, filter: Dict) -> fdo::Result<Vec<Dict>> {
+        let (cfg, toplevel) = self.state.ready()?;
+        let strain_filter = filter
+            .get("strain")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .map(str::to_owned);
+
+        let snapshots =
+            discover_snapshots(cfg, &self.state.backend, toplevel).map_err(map_core_error)?;
+        let live = resolve_live_parent(cfg, &self.state.backend, toplevel);
+
+        snapshots
+            .iter()
+            .filter(|s| match &strain_filter {
+                Some(want) => s.strain == *want,
+                None => true,
+            })
+            .map(|s| snapshot_to_dict(s, live.as_ref()))
+            .collect()
     }
 
-    async fn get_snapshot(&self, _strain: &str, _id: &str) -> fdo::Result<Dict> {
-        Err(not_implemented("GetSnapshot"))
+    async fn get_snapshot(&self, strain: &str, id: &str) -> fdo::Result<Dict> {
+        let (cfg, toplevel) = self.state.ready()?;
+        let snap_id = SnapshotId::from_string(id)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+        let snap = find_snapshot(cfg, &self.state.backend, toplevel, &snap_id, Some(strain))
+            .map_err(map_core_error)?;
+        let live = resolve_live_parent(cfg, &self.state.backend, toplevel);
+        snapshot_to_dict(&snap, live.as_ref())
     }
 
     async fn create_snapshot(&self, _strain: &str, _message: &str) -> fdo::Result<OwnedObjectPath> {
@@ -89,7 +128,13 @@ impl Daemon {
     // -- Live state ----------------------------------------------------
 
     async fn get_live_parent(&self) -> fdo::Result<Dict> {
-        Err(not_implemented("GetLiveParent"))
+        let (cfg, toplevel) = self.state.ready()?;
+        match resolve_live_parent(cfg, &self.state.backend, toplevel) {
+            Some(lp) => live_parent_to_dict(&lp),
+            // Empty dict ≡ "no resolvable parent" per the IDL. Avoids
+            // the awkward "Optional struct" wire type.
+            None => Ok(Dict::new()),
+        }
     }
 
     // -- Restore -------------------------------------------------------
@@ -132,18 +177,14 @@ fn not_implemented(method: &str) -> fdo::Error {
     fdo::Error::Failed(format!("{method} not implemented"))
 }
 
-fn insert_str(dict: &mut Dict, key: &str, value: &str) -> fdo::Result<()> {
-    let v: OwnedValue = Value::new(value)
-        .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
-    dict.insert(key.to_string(), v);
-    Ok(())
-}
-
-fn insert_bool(dict: &mut Dict, key: &str, value: bool) -> fdo::Result<()> {
-    let v: OwnedValue = Value::new(value)
-        .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
-    dict.insert(key.to_string(), v);
-    Ok(())
+/// Map a `revenant-core` error onto the closest D-Bus error. Custom
+/// `org.revenant.Error.*` errors will replace this once the error
+/// infrastructure lands; for now everything that isn't an obvious
+/// "not found" goes through `Failed`.
+fn map_core_error(err: RevenantError) -> fdo::Error {
+    match err {
+        RevenantError::SnapshotNotFound(_) => fdo::Error::Failed(err.to_string()),
+        RevenantError::Config(_) => fdo::Error::InvalidArgs(err.to_string()),
+        _ => fdo::Error::Failed(err.to_string()),
+    }
 }

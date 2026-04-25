@@ -1,10 +1,10 @@
 //! `revenantd` — privileged D-Bus daemon for revenant-gui.
 //!
 //! See `docs/design/dbus-interface.md` for the wire-level contract.
-//! This binary is a skeleton; the actual interface implementation lives
-//! in [`crate::dbus`].
 
 mod dbus;
+mod mount;
+mod state;
 
 use anyhow::{Context, Result};
 use tracing_subscriber::EnvFilter;
@@ -23,7 +23,17 @@ async fn main() -> Result<()> {
 
     tracing::info!("revenantd {} starting", env!("CARGO_PKG_VERSION"));
 
-    let daemon = dbus::Daemon::new();
+    // Initialize state (config + toplevel mount). The state is held by
+    // the D-Bus object; dropping the connection drops the object,
+    // which drops the state, which umounts the toplevel.
+    let state = state::DaemonState::initialize();
+    if let Some(reason) = &state.degraded {
+        tracing::warn!("daemon running in degraded state: {reason}");
+    } else {
+        tracing::info!("daemon ready");
+    }
+
+    let daemon = dbus::Daemon::new(state);
     let _conn = zbus::connection::Builder::system()
         .context("connect to system bus")?
         .name(BUS_NAME)

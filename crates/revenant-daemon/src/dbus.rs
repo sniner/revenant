@@ -1,15 +1,16 @@
 //! D-Bus interface implementation for `org.revenant.Daemon1`.
 //!
-//! All methods are stubs. Each returns a `NotImplemented` error so the
-//! GUI can be wired up against a real bus name and develop its proxy
-//! code while the actual logic is being filled in.
-//!
-//! See `docs/design/dbus-interface.md` for the full contract.
+//! Slice 1 wires up read-only metadata (`GetVersion`, `GetDaemonInfo`)
+//! against the live [`DaemonState`]. Everything else still returns
+//! `NotImplemented`. See `docs/design/dbus-interface.md`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use zbus::{fdo, interface};
 use zvariant::{OwnedObjectPath, OwnedValue, Value};
+
+use crate::state::DaemonState;
 
 /// Extensible-dict D-Bus type. `a{sv}` on the wire.
 type Dict = HashMap<String, OwnedValue>;
@@ -18,16 +19,12 @@ type Dict = HashMap<String, OwnedValue>;
 type StrainTuple = (String, Vec<String>, bool, Dict);
 
 pub struct Daemon {
-    // Real state lands here later:
-    //   - cached snapshot index, refreshed by inotify
-    //   - mutex around write-ops
-    //   - polkit authority handle
-    //   - mount lifecycle for /run/revenant/toplevel
+    state: Arc<DaemonState>,
 }
 
 impl Daemon {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(state: Arc<DaemonState>) -> Self {
+        Self { state }
     }
 }
 
@@ -41,10 +38,19 @@ impl Daemon {
 
     async fn get_daemon_info(&self) -> fdo::Result<Dict> {
         let mut out = Dict::new();
-        let version: OwnedValue = Value::new(env!("CARGO_PKG_VERSION"))
-            .try_to_owned()
-            .map_err(|e| fdo::Error::Failed(format!("encode version: {e}")))?;
-        out.insert("version".into(), version);
+        insert_str(&mut out, "version", env!("CARGO_PKG_VERSION"))?;
+        insert_str(&mut out, "backend", self.state.backend_name())?;
+        insert_bool(&mut out, "toplevel_mounted", self.state.toplevel.is_some())?;
+
+        if let Some(mount) = &self.state.toplevel {
+            insert_str(&mut out, "toplevel_path", &mount.path().to_string_lossy())?;
+        }
+        if let Some(cfg) = &self.state.config {
+            insert_str(&mut out, "device_uuid", &cfg.sys.rootfs.device_uuid)?;
+        }
+        if let Some(reason) = &self.state.degraded {
+            insert_str(&mut out, "degraded_reason", &reason.to_string())?;
+        }
         Ok(out)
     }
 
@@ -124,4 +130,20 @@ impl Daemon {
 
 fn not_implemented(method: &str) -> fdo::Error {
     fdo::Error::Failed(format!("{method} not implemented"))
+}
+
+fn insert_str(dict: &mut Dict, key: &str, value: &str) -> fdo::Result<()> {
+    let v: OwnedValue = Value::new(value)
+        .try_to_owned()
+        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
+    dict.insert(key.to_string(), v);
+    Ok(())
+}
+
+fn insert_bool(dict: &mut Dict, key: &str, value: bool) -> fdo::Result<()> {
+    let v: OwnedValue = Value::new(value)
+        .try_to_owned()
+        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
+    dict.insert(key.to_string(), v);
+    Ok(())
 }

@@ -11,20 +11,24 @@ The daemon owns the btrfs toplevel mount for its entire runtime
 interface on the **system bus**. Authorization for individual methods
 is delegated to polkit. Per-call wire contract: see [the design doc][design].
 
-This crate is a work in progress. Currently functional:
+The daemon is functionally complete for the Phase-1 GUI:
 
-- Daemon metadata: `GetVersion`, `GetDaemonInfo`.
-- Strain inspection: `ListStrains`, `GetStrain`.
-- Snapshot read-path: `ListSnapshots` (with optional strain filter),
-  `GetSnapshot`, `GetLiveParent`.
-- Live updates via inotify on the snapshot directory and
-  `/etc/revenant/`: emits `SnapshotsChanged` and `StrainConfigChanged`
-  with a 200 ms trailing-edge debounce.
+- **Metadata**: `GetVersion`, `GetDaemonInfo`.
+- **Strain inspection**: `ListStrains`, `GetStrain`.
+- **Snapshot read-path**: `ListSnapshots` (with optional strain
+  filter), `GetSnapshot`, `GetLiveParent`.
+- **Privileged writes** (all polkit-gated):
+  `SetStrainRetention` (round-trip TOML edit),
+  `CreateSnapshot` (synchronous),
+  `DeleteSnapshot` (synchronous),
+  `Restore` (synchronous, with optional `save_current` and
+  preflight findings in the result).
+- **Live updates** via inotify: `SnapshotsChanged`,
+  `StrainConfigChanged`, `LiveParentChanged` (emitted from the
+  restore path), debounced with a 200 ms trailing-edge window.
 
-Privileged write-paths (`SetStrainRetention`, `CreateSnapshot`,
-`DeleteSnapshot`, `Restore`) return `NotImplemented`. `LiveParentChanged`
-and `DaemonStateChanged` are not yet emitted (they ride on operations
-that aren't implemented yet).
+`DaemonStateChanged` is declared but not emitted yet. Hardening
+items still open are listed under [What's not here yet](#whats-not-here-yet).
 
 ## Status
 
@@ -134,9 +138,44 @@ snapshots, with the `*`-marked anchor matching `GetLiveParent`'s
 `(strain, id)`.
 
 ```sh
+# Privileged writes — all of these will trigger a polkit prompt the
+# first time, then re-use the cached auth (auth_admin_keep) for a
+# few minutes. Restore (auth_admin) re-prompts every time.
+
+# Edit retention: set strain "default" to last=5, daily=14, others
+# disabled. Note the array length (2) before the key/type/value
+# triples.
+busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
+    org.revenant.Daemon1 SetStrainRetention sa{sv} default 2 \
+        last u 5 daily u 14
+
+# Take a snapshot (empty message → omitted in the sidecar).
+busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
+    org.revenant.Daemon1 CreateSnapshot ss default ""
+
+# Delete a snapshot by (strain, id).
+busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
+    org.revenant.Daemon1 DeleteSnapshot ss default 20260413-142200
+
+# Restore: dry-run first to see preflight findings without touching
+# anything (returns the same shape as a real restore, but with
+# dry_run=true and no state change).
+busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
+    org.revenant.Daemon1 Restore ssa{sv} default 20260413-142200 1 \
+        dry_run b true
+
+# Real restore with save_current (this is the default; shown
+# explicitly here for completeness).
+busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
+    org.revenant.Daemon1 Restore ssa{sv} default 20260413-142200 1 \
+        save_current b true
+```
+
+```sh
 # Watch live updates. Then in a third shell, run something like
 # `sudo revenantctl snapshot --strain manual -m test` and see a
-# SnapshotsChanged signal appear here.
+# SnapshotsChanged signal appear here. After a Restore call, you
+# also see LiveParentChanged.
 busctl --system monitor org.revenant.Daemon1
 ```
 
@@ -176,20 +215,20 @@ sudo systemctl reload dbus-broker.service
 
 ## What's not here yet
 
-- The privileged write-paths (`SetStrainRetention`, `CreateSnapshot`,
-  `DeleteSnapshot`, `Restore`) — all stubs.
-- Polkit integration (the policy file exists but no method actually
-  calls `org.freedesktop.PolicyKit1.CheckAuthorization` yet).
 - Per-strain granularity for `SnapshotsChanged` — currently the signal
   always fires with `strain=""` (= "any"). Clients refresh the whole
   list anyway in practice.
-- `LiveParentChanged` / `DaemonStateChanged` — emitted from the restore
-  path once that exists.
-- Config hot-reload — the daemon reads the config once on startup. A
-  `StrainConfigChanged` signal is emitted on edit, but the daemon
-  itself still serves the cached config. Comes with the
-  `SetStrainRetention` slice.
+- `DaemonStateChanged` is declared but never emitted; intended for
+  transitions in/out of degraded state.
 - Custom `org.revenant.Error.*` D-Bus errors — currently everything
-  goes through `org.freedesktop.DBus.Error.Failed`.
-- D-Bus activation + a tested production install path. For now this is
-  a `cargo run` daemon only.
+  not modelled by `fdo` goes through `org.freedesktop.DBus.Error.Failed`
+  with a human-readable message. Functional, but not ideal for clients
+  that want to branch on error kind.
+- Idle-exit timer. The daemon stays up for the lifetime of the
+  process; D-Bus activation will start it on demand once that path
+  is wired, and an idle timeout would let it shut itself down again.
+- D-Bus activation + a tested production install path. For now this
+  is a `cargo run` daemon only; the systemd unit and bus-activation
+  files in `data/` are stubs that have not been exercised end to end.
+- Packaging (Make/just/xtask targets, distro packages). The bus
+  policy must currently be installed by hand.

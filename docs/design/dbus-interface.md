@@ -48,7 +48,6 @@ The trailing `1` in the names is the API version. Breaking changes ship as
 | `org.revenant.snapshot.delete`  | `auth_admin_keep`   | Cached.                                |
 | `org.revenant.config.edit`      | `auth_admin_keep`   | Cached.                                |
 | `org.revenant.restore`          | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
-| `org.revenant.cancel`           | `auth_self`         | Owner of an in-progress operation can cancel it without re-auth. |
 
 The polkit policy file ships in `data/org.revenant.policy` and is installed
 to `/usr/share/polkit-1/actions/`.
@@ -100,13 +99,6 @@ live rootfs has no resolvable parent (pristine system, or anchor lost).
   "id":     s,    -- e.g. "20260413-142200"
 }
 ```
-
-### `OperationHandle` — `o`
-
-An object path like `/org/revenant/Operation/<id>`. Long-running
-operations (`Restore`, `CreateSnapshot` for big subvolumes) return such a
-handle and emit `Progress`/`Finished` signals on it. Short ones may return
-a handle that is already in the `Finished` state.
 
 ## Methods
 
@@ -167,28 +159,35 @@ either, and the surface stays small.
 ### Restore
 
 ```text
-Restore(strain: s, id: s, options: a{sv}) -> (o) -- privileged: org.revenant.restore
+Restore(strain: s, id: s, options: a{sv}) -> (a{sv}) -- privileged: org.revenant.restore
 ```
 
 `options` keys (initial set):
-- `save_current` (`b`) — take a `--save-current` snapshot first.
-- `dry_run` (`b`) — plan only, return without executing.
+- `save_current` (`b`) — take a `--save-current` snapshot first
+  (default: `true`).
+- `dry_run` (`b`) — run preflight checks only and return without
+  touching subvolumes (default: `false`).
 
-The returned operation handle exposes the `org.revenant.Operation1`
-interface (see below). The actual subvolume rename happens immediately;
-the operation is "finished" when the rename is committed and the daemon
-has refreshed its view.
+Returns a result dict with:
+- `restored_id`, `restored_strain` — echo of the input.
+- `pre_restore_id`, `pre_restore_strain` — present iff a save-current
+  snapshot was created.
+- `dry_run` (`b`) — `true` iff `options.dry_run` was set; in that
+  case no other keys describe state changes.
+- `findings` (`aa{sv}`) — preflight findings (severity / check / message /
+  optional hint). Always present, may be empty. `Severity::Error` items
+  block the restore unless overridden.
 
-### Operation control (per-handle, on `org.revenant.Operation1`)
+A successful restore emits `LiveParentChanged` so subscribed clients
+know to re-fetch `GetLiveParent`.
 
-```text
-GetState() -> (a{sv})           -- {"state": s, "progress": d, "message": s}
-Cancel()                        -- privileged: org.revenant.cancel; only valid in some states
-```
-
-`state` is one of `pending`, `running`, `finished`, `failed`, `cancelled`.
-A failed operation includes `error_kind` (`s`) and `error_message` (`s`)
-in the dict.
+Restore is intentionally **synchronous** rather than going through an
+`OperationHandle`. The full pipeline — pre-restore snapshot, EFI sync,
+subvolume rename, live-state refresh — completes well under 10 s on
+typical hardware, and partial-cancel is dangerous once the rename is
+in progress. If a future profile shows EFI sync turning into a real
+multi-minute operation, an additional `RestoreAsync` returning a handle
+can be added without breaking this signature.
 
 ## Signals
 
@@ -199,13 +198,6 @@ SnapshotsChanged(strain: s)                     -- "" means: any/all
 StrainConfigChanged()
 LiveParentChanged()                             -- emitted after a successful restore
 DaemonStateChanged(state: s, message: s)        -- "ready", "degraded", "error"
-```
-
-On `org.revenant.Operation1`:
-
-```text
-Progress(progress: d, message: s)               -- 0.0..=1.0
-Finished(success: b, error_kind: s, error_message: s)
 ```
 
 Clients are expected to subscribe via `Match` rules (zbus does this

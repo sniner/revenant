@@ -64,14 +64,4 @@
       <allow_active>auth_admin</allow_active>
     </defaults>
   </action>
-
-  <action id="org.revenant.cancel">
-    <description>Cancel a revenant operation</description>
-    <message>Authentication is required to cancel an operation.</message>
-    <defaults>
-      <allow_any>auth_self</allow_any>
-      <allow_inactive>auth_self</allow_inactive>
-      <allow_active>auth_self</allow_active>
-    </defaults>
-  </action>
 </policyconfig>

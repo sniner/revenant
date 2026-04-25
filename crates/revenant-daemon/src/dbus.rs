@@ -7,19 +7,26 @@
 //! 3. Inotify watchers + `SnapshotsChanged` / `StrainConfigChanged`.
 //! 4. `SetStrainRetention` with polkit + atomic config edit.
 //! 5. `CreateSnapshot` / `DeleteSnapshot`, both synchronous.
+//! 6. `Restore` (synchronous, with `save_current` + preflight +
+//!    `LiveParentChanged`).
 //!
-//! `Restore` is still stubbed. See `docs/design/dbus-interface.md`.
+//! See `docs/design/dbus-interface.md` for the wire-level contract.
 
 use std::sync::Arc;
 
+use std::path::Path;
+
+use revenant_core::check::{Finding, Severity};
 use revenant_core::metadata::Trigger;
+use revenant_core::preflight::{MACHINED_RUNTIME_DIR, preflight_restore};
+use revenant_core::restore::restore_snapshot as core_restore_snapshot;
 use revenant_core::snapshot::{
     create_snapshot as core_create_snapshot, delete_snapshot as core_delete_snapshot,
     discover_snapshots, find_snapshot, resolve_live_parent,
 };
 use revenant_core::{RetainConfig, RevenantError, SnapshotId};
 use zbus::{fdo, interface};
-use zvariant::OwnedObjectPath;
+use zvariant::Value;
 
 use crate::config_edit;
 use crate::marshal::{
@@ -250,11 +257,104 @@ impl Daemon {
 
     async fn restore(
         &self,
-        _strain: &str,
-        _id: &str,
-        _options: Dict,
-    ) -> fdo::Result<OwnedObjectPath> {
-        Err(not_implemented("Restore"))
+        strain: &str,
+        id: &str,
+        options: Dict,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> fdo::Result<Dict> {
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+        polkit::check(conn, sender.as_str(), "org.revenant.restore").await?;
+
+        let save_current = read_bool_opt(&options, "save_current").unwrap_or(true);
+        let dry_run = read_bool_opt(&options, "dry_run").unwrap_or(false);
+
+        let ready = self.state.ready().await?;
+        let snap_id = SnapshotId::from_string(id)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+        let snapshot = find_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snap_id,
+            Some(strain),
+        )
+        .map_err(map_core_error)?;
+
+        // Preflight: blocking findings (Severity::Error) abort the
+        // restore. The CLI offers --force; the GUI surfaces the
+        // findings and asks the user to fix the underlying issue
+        // before retrying. No --force in the daemon for now.
+        let findings = preflight_restore(Path::new(MACHINED_RUNTIME_DIR));
+        let blocking: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .collect();
+        if !dry_run && !blocking.is_empty() {
+            let summary = blocking
+                .iter()
+                .map(|f| format!("{}: {}", f.check, f.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(fdo::Error::Failed(format!(
+                "preflight blocked restore: {summary}"
+            )));
+        }
+
+        let mut out = Dict::new();
+        marshal::insert_str(&mut out, "restored_id", id)?;
+        marshal::insert_str(&mut out, "restored_strain", strain)?;
+        marshal::insert_bool(&mut out, "dry_run", dry_run)?;
+        attach_findings(&mut out, &findings)?;
+
+        if dry_run {
+            return Ok(out);
+        }
+
+        let pre_restore = if save_current {
+            // Mirror the CLI: --save-current creates a strain-internal
+            // snapshot tagged with `Trigger::restore(<target id>)`. If
+            // this fails we abort *before* touching live subvolumes —
+            // the whole point of save_current is a safety net.
+            let info = core_create_snapshot(
+                ready.config(),
+                &self.state.backend,
+                ready.toplevel(),
+                strain,
+                None,
+                Trigger::restore(snapshot.id.to_string()),
+            )
+            .map_err(map_core_error)?;
+            Some(info)
+        } else {
+            None
+        };
+
+        core_restore_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snapshot,
+        )
+        .map_err(map_core_error)?;
+
+        if let Some(pre) = &pre_restore {
+            marshal::insert_str(&mut out, "pre_restore_id", pre.id.as_str())?;
+            marshal::insert_str(&mut out, "pre_restore_strain", &pre.strain)?;
+        }
+
+        // Tell subscribers the live parent moved. SnapshotsChanged
+        // also fires (via the inotify watcher catching the new
+        // subvolumes), but it doesn't carry "the anchor changed" —
+        // that's what LiveParentChanged is for.
+        if let Err(e) = Self::live_parent_changed(&signal_emitter).await {
+            tracing::warn!("emit LiveParentChanged after restore: {e}");
+        }
+
+        Ok(out)
     }
 
     // -- Signals -------------------------------------------------------
@@ -283,10 +383,6 @@ impl Daemon {
     ) -> zbus::Result<()>;
 }
 
-fn not_implemented(method: &str) -> fdo::Error {
-    fdo::Error::Failed(format!("{method} not implemented"))
-}
-
 /// Map a `revenant-core` error onto the closest D-Bus error. Custom
 /// `org.revenant.Error.*` errors will replace this once the error
 /// infrastructure lands; for now everything that isn't an obvious
@@ -297,6 +393,37 @@ fn map_core_error(err: RevenantError) -> fdo::Error {
         RevenantError::Config(_) => fdo::Error::InvalidArgs(err.to_string()),
         _ => fdo::Error::Failed(err.to_string()),
     }
+}
+
+/// Read an optional `bool` option from an extensible-dict argument.
+/// Returns `None` if the key is missing, `Some(b)` if it parses, an
+/// error if the key is present with a non-bool value.
+fn read_bool_opt(d: &Dict, key: &str) -> Option<bool> {
+    d.get(key).and_then(|v| bool::try_from(v).ok())
+}
+
+/// Append `findings` as `aa{sv}` under the `findings` key. Always
+/// emits the key, even for an empty array — the GUI can rely on its
+/// presence rather than checking for absence.
+fn attach_findings(out: &mut Dict, findings: &[Finding]) -> fdo::Result<()> {
+    let encoded: Vec<Dict> = findings
+        .iter()
+        .map(|f| {
+            let mut d = Dict::new();
+            marshal::insert_str(&mut d, "severity", f.severity.label())?;
+            marshal::insert_str(&mut d, "check", f.check)?;
+            marshal::insert_str(&mut d, "message", &f.message)?;
+            if let Some(hint) = &f.hint {
+                marshal::insert_str(&mut d, "hint", hint)?;
+            }
+            Ok::<_, fdo::Error>(d)
+        })
+        .collect::<fdo::Result<_>>()?;
+    let value = Value::from(encoded)
+        .try_to_owned()
+        .map_err(|e| fdo::Error::Failed(format!("encode findings: {e}")))?;
+    out.insert("findings".to_string(), value);
+    Ok(())
 }
 
 /// Decode a retention dict (`a{sv}`) into a [`RetainConfig`]. Missing

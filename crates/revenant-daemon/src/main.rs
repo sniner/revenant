@@ -2,9 +2,11 @@
 //!
 //! See `docs/design/dbus-interface.md` for the wire-level contract.
 
+mod config_edit;
 mod dbus;
 mod marshal;
 mod mount;
+mod polkit;
 mod state;
 mod watcher;
 
@@ -41,11 +43,14 @@ async fn main() -> Result<()> {
     // Compute watcher paths *before* moving `state` into the Daemon —
     // the snapshot dir lives inside the toplevel mount, the config
     // path is a daemon-wide constant.
-    let snapshot_dir = state
-        .toplevel
-        .as_ref()
-        .zip(state.config.as_ref())
-        .map(|(mount, cfg)| mount.path().join(&cfg.sys.snapshot_subvol));
+    let snapshot_dir = {
+        let cfg_guard = state.config.read().await;
+        state
+            .toplevel
+            .as_ref()
+            .zip(cfg_guard.as_ref())
+            .map(|(mount, cfg)| mount.path().join(&cfg.sys.snapshot_subvol))
+    };
 
     let daemon = dbus::Daemon::new(state);
     let conn = zbus::connection::Builder::system()

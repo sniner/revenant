@@ -25,10 +25,11 @@ use revenant_core::snapshot::{
     discover_snapshots, find_snapshot, resolve_live_parent,
 };
 use revenant_core::{RetainConfig, RevenantError, SnapshotId};
-use zbus::{fdo, interface};
+use zbus::interface;
 use zvariant::Value;
 
 use crate::config_edit;
+use crate::errors::DaemonError;
 use crate::marshal::{
     self, Dict, StrainTuple, live_parent_to_dict, snapshot_to_dict, strain_to_tuple,
 };
@@ -53,7 +54,7 @@ impl Daemon {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
-    async fn get_daemon_info(&self) -> fdo::Result<Dict> {
+    async fn get_daemon_info(&self) -> Result<Dict, DaemonError> {
         let mut out = Dict::new();
         marshal::insert_str(&mut out, "version", env!("CARGO_PKG_VERSION"))?;
         marshal::insert_str(&mut out, "backend", self.state.backend_name())?;
@@ -75,26 +76,26 @@ impl Daemon {
 
     // -- Strains -------------------------------------------------------
 
-    async fn list_strains(&self) -> fdo::Result<Vec<StrainTuple>> {
+    async fn list_strains(&self) -> Result<Vec<StrainTuple>, DaemonError> {
         let ready = self.state.ready().await?;
         let mut out: Vec<StrainTuple> = ready
             .config()
             .strain
             .iter()
             .map(|(name, sc)| strain_to_tuple(name, sc))
-            .collect::<fdo::Result<_>>()?;
+            .collect::<Result<_, DaemonError>>()?;
         // Stable order so clients don't have to re-sort.
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
 
-    async fn get_strain(&self, name: &str) -> fdo::Result<StrainTuple> {
+    async fn get_strain(&self, name: &str) -> Result<StrainTuple, DaemonError> {
         let ready = self.state.ready().await?;
         let sc = ready
             .config()
             .strain
             .get(name)
-            .ok_or_else(|| fdo::Error::Failed(format!("unknown strain: {name}")))?;
+            .ok_or_else(|| DaemonError::NotFound(format!("unknown strain: {name}")))?;
         strain_to_tuple(name, sc)
     }
 
@@ -104,10 +105,10 @@ impl Daemon {
         retention: Dict,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), DaemonError> {
         let sender = hdr
             .sender()
-            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
         polkit::check(conn, sender.as_str(), "org.revenant.config.edit").await?;
 
         // Validate the strain exists before we touch the file.
@@ -115,15 +116,15 @@ impl Daemon {
             let cfg_guard = self.state.config.read().await;
             let cfg = cfg_guard
                 .as_ref()
-                .ok_or_else(|| fdo::Error::Failed("config not loaded".into()))?;
+                .ok_or_else(|| DaemonError::BackendUnavailable("config not loaded".into()))?;
             if !cfg.strain.contains_key(name) {
-                return Err(fdo::Error::Failed(format!("unknown strain: {name}")));
+                return Err(DaemonError::NotFound(format!("unknown strain: {name}")));
             }
         }
 
         let retain = parse_retain(&retention)?;
         config_edit::set_strain_retention(name, &retain)
-            .map_err(|e| fdo::Error::Failed(format!("config edit: {e:#}")))?;
+            .map_err(|e| DaemonError::Internal(format!("config edit: {e:#}")))?;
 
         // Pick up the new values into the in-memory config so
         // subsequent reads see the change immediately. The watcher
@@ -132,14 +133,14 @@ impl Daemon {
         self.state
             .reload_config()
             .await
-            .map_err(|e| fdo::Error::Failed(format!("reload config: {e:#}")))?;
+            .map_err(|e| DaemonError::Internal(format!("reload config: {e:#}")))?;
 
         Ok(())
     }
 
     // -- Snapshots -----------------------------------------------------
 
-    async fn list_snapshots(&self, filter: Dict) -> fdo::Result<Vec<Dict>> {
+    async fn list_snapshots(&self, filter: Dict) -> Result<Vec<Dict>, DaemonError> {
         let ready = self.state.ready().await?;
         let strain_filter = filter
             .get("strain")
@@ -160,10 +161,10 @@ impl Daemon {
             .collect()
     }
 
-    async fn get_snapshot(&self, strain: &str, id: &str) -> fdo::Result<Dict> {
+    async fn get_snapshot(&self, strain: &str, id: &str) -> Result<Dict, DaemonError> {
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
-            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+            .map_err(|e| DaemonError::InvalidArgument(format!("invalid snapshot id {id}: {e}")))?;
         let snap = find_snapshot(
             ready.config(),
             &self.state.backend,
@@ -182,10 +183,10 @@ impl Daemon {
         message: &str,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
-    ) -> fdo::Result<Dict> {
+    ) -> Result<Dict, DaemonError> {
         let sender = hdr
             .sender()
-            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
         polkit::check(conn, sender.as_str(), "org.revenant.snapshot.create").await?;
 
         let ready = self.state.ready().await?;
@@ -214,15 +215,15 @@ impl Daemon {
         id: &str,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), DaemonError> {
         let sender = hdr
             .sender()
-            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
         polkit::check(conn, sender.as_str(), "org.revenant.snapshot.delete").await?;
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
-            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+            .map_err(|e| DaemonError::InvalidArgument(format!("invalid snapshot id {id}: {e}")))?;
         let snapshot = find_snapshot(
             ready.config(),
             &self.state.backend,
@@ -243,7 +244,7 @@ impl Daemon {
 
     // -- Live state ----------------------------------------------------
 
-    async fn get_live_parent(&self) -> fdo::Result<Dict> {
+    async fn get_live_parent(&self) -> Result<Dict, DaemonError> {
         let ready = self.state.ready().await?;
         match resolve_live_parent(ready.config(), &self.state.backend, ready.toplevel()) {
             Some(lp) => live_parent_to_dict(&lp),
@@ -263,10 +264,10 @@ impl Daemon {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
-    ) -> fdo::Result<Dict> {
+    ) -> Result<Dict, DaemonError> {
         let sender = hdr
             .sender()
-            .ok_or_else(|| fdo::Error::Failed("method call has no sender".into()))?;
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
         polkit::check(conn, sender.as_str(), "org.revenant.restore").await?;
 
         let save_current = read_bool_opt(&options, "save_current").unwrap_or(true);
@@ -274,7 +275,7 @@ impl Daemon {
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
-            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid snapshot id {id}: {e}")))?;
+            .map_err(|e| DaemonError::InvalidArgument(format!("invalid snapshot id {id}: {e}")))?;
         let snapshot = find_snapshot(
             ready.config(),
             &self.state.backend,
@@ -299,9 +300,7 @@ impl Daemon {
                 .map(|f| format!("{}: {}", f.check, f.message))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(fdo::Error::Failed(format!(
-                "preflight blocked restore: {summary}"
-            )));
+            return Err(DaemonError::PreflightBlocked(summary));
         }
 
         let mut out = Dict::new();
@@ -383,15 +382,19 @@ impl Daemon {
     ) -> zbus::Result<()>;
 }
 
-/// Map a `revenant-core` error onto the closest D-Bus error. Custom
-/// `org.revenant.Error.*` errors will replace this once the error
-/// infrastructure lands; for now everything that isn't an obvious
-/// "not found" goes through `Failed`.
-fn map_core_error(err: RevenantError) -> fdo::Error {
+/// Map a `revenant-core` error onto the closest custom D-Bus error.
+/// Categories follow the wire-error table in the design doc.
+fn map_core_error(err: RevenantError) -> DaemonError {
     match err {
-        RevenantError::SnapshotNotFound(_) => fdo::Error::Failed(err.to_string()),
-        RevenantError::Config(_) => fdo::Error::InvalidArgs(err.to_string()),
-        _ => fdo::Error::Failed(err.to_string()),
+        RevenantError::SnapshotNotFound(_) | RevenantError::SubvolumeNotFound(_) => {
+            DaemonError::NotFound(err.to_string())
+        }
+        RevenantError::Config(_) => DaemonError::InvalidArgument(err.to_string()),
+        RevenantError::NotBtrfs { .. } | RevenantError::Mount(_) => {
+            DaemonError::BackendUnavailable(err.to_string())
+        }
+        RevenantError::NotRoot => DaemonError::NotAuthorized(err.to_string()),
+        _ => DaemonError::Internal(err.to_string()),
     }
 }
 
@@ -405,7 +408,7 @@ fn read_bool_opt(d: &Dict, key: &str) -> Option<bool> {
 /// Append `findings` as `aa{sv}` under the `findings` key. Always
 /// emits the key, even for an empty array — the GUI can rely on its
 /// presence rather than checking for absence.
-fn attach_findings(out: &mut Dict, findings: &[Finding]) -> fdo::Result<()> {
+fn attach_findings(out: &mut Dict, findings: &[Finding]) -> Result<(), DaemonError> {
     let encoded: Vec<Dict> = findings
         .iter()
         .map(|f| {
@@ -416,25 +419,25 @@ fn attach_findings(out: &mut Dict, findings: &[Finding]) -> fdo::Result<()> {
             if let Some(hint) = &f.hint {
                 marshal::insert_str(&mut d, "hint", hint)?;
             }
-            Ok::<_, fdo::Error>(d)
+            Ok::<_, DaemonError>(d)
         })
-        .collect::<fdo::Result<_>>()?;
+        .collect::<Result<_, DaemonError>>()?;
     let value = Value::from(encoded)
         .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode findings: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("encode findings: {e}")))?;
     out.insert("findings".to_string(), value);
     Ok(())
 }
 
 /// Decode a retention dict (`a{sv}`) into a [`RetainConfig`]. Missing
 /// keys default to 0 (= disabled), per the IDL.
-fn parse_retain(d: &Dict) -> fdo::Result<RetainConfig> {
-    fn read_tier(d: &Dict, key: &str) -> fdo::Result<usize> {
+fn parse_retain(d: &Dict) -> Result<RetainConfig, DaemonError> {
+    fn read_tier(d: &Dict, key: &str) -> Result<usize, DaemonError> {
         match d.get(key) {
             None => Ok(0),
             Some(v) => u32::try_from(v)
                 .map(|n| n as usize)
-                .map_err(|e| fdo::Error::InvalidArgs(format!("{key}: not a u32: {e}"))),
+                .map_err(|e| DaemonError::InvalidArgument(format!("{key}: not a u32: {e}"))),
         }
     }
     Ok(RetainConfig {

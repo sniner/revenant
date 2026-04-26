@@ -16,6 +16,7 @@ use revenant_core::Config;
 use revenant_core::backend::btrfs::BtrfsBackend;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
+use crate::errors::DaemonError;
 use crate::mount::ToplevelMount;
 
 /// Why the daemon could not establish its full operating state. Each
@@ -67,7 +68,7 @@ impl DaemonState {
     /// Acquire a read-lock on config and verify the backend is fully
     /// up. Returns a guard that holds the read-lock and exposes both
     /// the config and the toplevel path.
-    pub async fn ready(&self) -> Result<ReadyState<'_>, zbus::fdo::Error> {
+    pub async fn ready(&self) -> Result<ReadyState<'_>, DaemonError> {
         let config_guard = self.config.read().await;
         let toplevel = self
             .toplevel
@@ -97,13 +98,12 @@ impl DaemonState {
         "btrfs"
     }
 
-    fn backend_unavailable(&self) -> zbus::fdo::Error {
-        zbus::fdo::Error::Failed(format!(
-            "backend unavailable: {}",
+    fn backend_unavailable(&self) -> DaemonError {
+        DaemonError::BackendUnavailable(
             self.degraded
                 .as_ref()
-                .map_or_else(|| "unknown".to_string(), ToString::to_string)
-        ))
+                .map_or_else(|| "unknown".to_string(), ToString::to_string),
+        )
     }
 }
 

@@ -7,8 +7,9 @@ use std::collections::HashMap;
 
 use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
 use revenant_core::{LiveParentRef, RetainConfig, SnapshotInfo, StrainConfig};
-use zbus::fdo;
 use zvariant::{OwnedValue, Value};
+
+use crate::errors::{DaemonError, DaemonResult};
 
 /// `a{sv}` extensible dict.
 pub type Dict = HashMap<String, OwnedValue>;
@@ -16,7 +17,7 @@ pub type Dict = HashMap<String, OwnedValue>;
 /// Strain wire type — `(sasba{sv})`.
 pub type StrainTuple = (String, Vec<String>, bool, Dict);
 
-pub fn strain_to_tuple(name: &str, cfg: &StrainConfig) -> fdo::Result<StrainTuple> {
+pub fn strain_to_tuple(name: &str, cfg: &StrainConfig) -> DaemonResult<StrainTuple> {
     Ok((
         name.to_string(),
         cfg.subvolumes.clone(),
@@ -25,7 +26,7 @@ pub fn strain_to_tuple(name: &str, cfg: &StrainConfig) -> fdo::Result<StrainTupl
     ))
 }
 
-pub fn retain_to_dict(r: &RetainConfig) -> fdo::Result<Dict> {
+pub fn retain_to_dict(r: &RetainConfig) -> DaemonResult<Dict> {
     let mut d = Dict::new();
     insert_u32(&mut d, "last", to_u32(r.last))?;
     insert_u32(&mut d, "hourly", to_u32(r.hourly))?;
@@ -39,7 +40,7 @@ pub fn retain_to_dict(r: &RetainConfig) -> fdo::Result<Dict> {
 pub fn snapshot_to_dict(
     snap: &SnapshotInfo,
     live_parent: Option<&LiveParentRef>,
-) -> fdo::Result<Dict> {
+) -> DaemonResult<Dict> {
     let mut d = Dict::new();
     insert_str(&mut d, "id", snap.id.as_str())?;
     insert_str(&mut d, "strain", &snap.strain)?;
@@ -71,7 +72,7 @@ pub fn snapshot_to_dict(
     Ok(d)
 }
 
-pub fn live_parent_to_dict(lp: &LiveParentRef) -> fdo::Result<Dict> {
+pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {
     let mut d = Dict::new();
     insert_str(&mut d, "strain", &lp.strain)?;
     insert_str(&mut d, "id", lp.id.as_str())?;
@@ -99,26 +100,26 @@ fn to_u32(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-pub fn insert_str(dict: &mut Dict, key: &str, value: &str) -> fdo::Result<()> {
+pub fn insert_str(dict: &mut Dict, key: &str, value: &str) -> DaemonResult<()> {
     let v: OwnedValue = Value::new(value)
         .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("encode {key}: {e}")))?;
     dict.insert(key.to_string(), v);
     Ok(())
 }
 
-pub fn insert_bool(dict: &mut Dict, key: &str, value: bool) -> fdo::Result<()> {
+pub fn insert_bool(dict: &mut Dict, key: &str, value: bool) -> DaemonResult<()> {
     let v: OwnedValue = Value::new(value)
         .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("encode {key}: {e}")))?;
     dict.insert(key.to_string(), v);
     Ok(())
 }
 
-pub fn insert_u32(dict: &mut Dict, key: &str, value: u32) -> fdo::Result<()> {
+pub fn insert_u32(dict: &mut Dict, key: &str, value: u32) -> DaemonResult<()> {
     let v: OwnedValue = Value::new(value)
         .try_to_owned()
-        .map_err(|e| fdo::Error::Failed(format!("encode {key}: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("encode {key}: {e}")))?;
     dict.insert(key.to_string(), v);
     Ok(())
 }

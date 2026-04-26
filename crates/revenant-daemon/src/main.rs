@@ -4,6 +4,7 @@
 
 mod config_edit;
 mod dbus;
+mod errors;
 mod marshal;
 mod mount;
 mod polkit;

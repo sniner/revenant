@@ -213,6 +213,7 @@ to a variant of `revenant_core::RevenantError`:
 | `org.revenant.Error.NotAuthorized`       | polkit denial                      |
 | `org.revenant.Error.NotFound`            | unknown strain or snapshot id      |
 | `org.revenant.Error.InvalidArgument`     | malformed input                    |
+| `org.revenant.Error.PreflightBlocked`    | restore preflight reported `Severity::Error` findings |
 | `org.revenant.Error.Conflict`            | concurrent operation in progress   |
 | `org.revenant.Error.BackendUnavailable`  | toplevel not mounted, btrfs missing |
 | `org.revenant.Error.Internal`            | catch-all; details in message      |

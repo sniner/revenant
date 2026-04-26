@@ -9,8 +9,10 @@
 
 use std::collections::HashMap;
 
-use zbus::{fdo, proxy};
+use zbus::proxy;
 use zvariant::Value;
+
+use crate::errors::{DaemonError, DaemonResult};
 
 /// Tell polkit it may show an auth dialog if the caller is allowed to
 /// authenticate. Without this flag, polkit returns "not authorized"
@@ -41,13 +43,13 @@ pub trait Authority {
 /// Check whether the caller identified by `bus_name` (a unique
 /// system-bus name like `:1.42`) may perform `action_id`.
 ///
-/// Returns `Ok(())` on grant, `fdo::Error::AccessDenied` on denial.
+/// Returns `Ok(())` on grant, `DaemonError::NotAuthorized` on denial.
 /// `is_challenge` (i.e. polkit started but did not complete an
 /// auth dialog) is treated as denial — the caller can simply retry.
-pub async fn check(conn: &zbus::Connection, bus_name: &str, action_id: &str) -> fdo::Result<()> {
+pub async fn check(conn: &zbus::Connection, bus_name: &str, action_id: &str) -> DaemonResult<()> {
     let proxy = AuthorityProxy::new(conn)
         .await
-        .map_err(|e| fdo::Error::Failed(format!("polkit proxy: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("polkit proxy: {e}")))?;
 
     let subject_details = HashMap::from([("name", Value::from(bus_name))]);
     let subject = ("system-bus-name", subject_details);
@@ -61,12 +63,12 @@ pub async fn check(conn: &zbus::Connection, bus_name: &str, action_id: &str) -> 
             "",
         )
         .await
-        .map_err(|e| fdo::Error::Failed(format!("polkit check {action_id}: {e}")))?;
+        .map_err(|e| DaemonError::Internal(format!("polkit check {action_id}: {e}")))?;
 
     if is_authorized {
         Ok(())
     } else {
-        Err(fdo::Error::AccessDenied(format!(
+        Err(DaemonError::NotAuthorized(format!(
             "not authorized for action {action_id}"
         )))
     }

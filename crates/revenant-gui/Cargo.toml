@@ -27,3 +27,7 @@ zvariant = { workspace = true }
 # GUI-only dependencies — kept local to this crate.
 gtk = { package = "gtk4", version = "0.9" }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+
+# Runtime-agnostic channel: the dbus-worker pushes events from a
+# tokio runtime, the GTK side drains on the glib MainContext.
+async-channel = "2"

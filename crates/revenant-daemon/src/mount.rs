@@ -5,6 +5,7 @@
 //! is `/run/revenant/toplevel`. The unit file (`PrivateMounts=true`)
 //! keeps the mount inside the daemon's own namespace.
 
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -27,12 +28,14 @@ impl ToplevelMount {
     /// over from a hard daemon kill.
     pub fn mount(config: &Config) -> Result<Self> {
         let mount_point = PathBuf::from(TOPLEVEL_MOUNT_POINT);
+        // 0700 on both the parent and the mount point so non-root users
+        // cannot traverse into the daemon's mount tree. Matters most for
+        // dev runs without `PrivateMounts=true`; defense-in-depth under
+        // systemd.
         if let Some(parent) = mount_point.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create parent dir {}", parent.display()))?;
+            ensure_private_dir(parent)?;
         }
-        std::fs::create_dir_all(&mount_point)
-            .with_context(|| format!("create mount point {}", mount_point.display()))?;
+        ensure_private_dir(&mount_point)?;
 
         // If a previous daemon instance was killed without running the
         // umount path, the mount-point will still be a mountpoint and a
@@ -86,6 +89,21 @@ impl Drop for ToplevelMount {
     }
 }
 
+/// Create `path` (and any missing parents) with mode 0700, and re-apply
+/// 0700 if the directory already existed — `DirBuilder::create` does not
+/// touch the mode of pre-existing dirs, so we cannot rely on creation
+/// alone to keep the mountpoint private across daemon restarts.
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .with_context(|| format!("create dir {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 0o700 {}", path.display()))?;
+    Ok(())
+}
+
 /// Stat-based mount-point check: a path is a mount point iff its
 /// device id differs from its parent's. Errors fall through to "not a
 /// mount point" so a missing path retries the mount.
@@ -99,4 +117,32 @@ fn is_mount_point(path: &Path) -> bool {
         return false;
     };
     self_meta.dev() != parent_meta.dev()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn ensure_private_dir_creates_new_with_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested/private");
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[test]
+    fn ensure_private_dir_tightens_existing_loose_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("loose");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(mode_of(&dir), 0o755);
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
 }

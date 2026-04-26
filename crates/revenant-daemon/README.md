@@ -48,34 +48,90 @@ items still open are listed under [What's not here yet](#whats-not-here-yet).
 
 ## Manual development install
 
-The daemon needs a D-Bus bus-policy file installed before it is allowed
-to claim the well-known name `org.revenant.Daemon1` on the system bus.
-Without it, startup fails with `Permission denied: org.freedesktop.DBus.Error.AccessDenied`.
+Two policy files are required before the daemon is usable: a D-Bus
+bus-policy (without it, startup fails with `AccessDenied` because the
+daemon cannot claim its well-known name) and a polkit action policy
+(without it, privileged methods fail with `Action … is not registered`
+before they reach the daemon at all).
 
 ```sh
 # From the repo root.
 
 # 1. D-Bus bus access policy. Defines who may own the bus name and who
-#    may call methods on it. Required. The mkdir is needed on minimal
-#    installs (e.g. Arch without a desktop environment) where the
-#    `dbus` package only ships /usr/share/dbus-1/system.d/ and the
-#    admin override dir is not created until something else needs it.
-#    Harmless on systems where the dir already exists.
+#    may call methods on it. The mkdir is needed on minimal installs
+#    (e.g. Arch without a desktop environment) where the `dbus` package
+#    only ships /usr/share/dbus-1/system.d/ and the admin override dir
+#    is not created until something else needs it. Harmless on systems
+#    where the dir already exists.
 sudo mkdir -p /etc/dbus-1/system.d
 sudo install -m644 data/org.revenant.Daemon1.conf /etc/dbus-1/system.d/
 
-# 2. Reload the bus so it picks up the new policy. Use whichever unit
+# 2. Polkit action definitions. Every privileged method
+#    (SetStrainRetention / CreateSnapshot / DeleteSnapshot / Restore)
+#    asks polkit for an action by id; without this file polkit replies
+#    "action not registered" and the call fails before it ever reaches
+#    the daemon's logic.
+sudo install -m644 data/org.revenant.policy /usr/share/polkit-1/actions/
+
+# 3. Reload the bus so it picks up the new policy. Use whichever unit
 #    is running on your system — `dbus.service` on Arch and Debian-
 #    based distros, `dbus-broker.service` on Fedora and recent SUSE.
+#    Polkit needs no reload; it re-reads its actions/rules dirs on
+#    every check.
 sudo systemctl reload dbus.service   # or: dbus-broker.service
 ```
 
-That's all that is required for development. The polkit policy
-(`data/org.revenant.policy`), the D-Bus service-activation file
-(`data/org.revenant.Daemon1.service`), and the systemd unit
-(`data/revenant-daemon.service`) are **not** needed while you start
-the daemon by hand — they only matter for an installed system where
-the daemon is meant to be started on demand by D-Bus activation.
+That's all that is required for development. The D-Bus
+service-activation file (`data/org.revenant.Daemon1.service`) and the
+systemd unit (`data/revenant-daemon.service`) are **not** needed while
+you start the daemon by hand — they only matter for an installed
+system where the daemon is meant to be started on demand by D-Bus
+activation.
+
+### Polkit auth on a desktop-less system
+
+The privileged methods are gated by `auth_admin` actions, so polkit
+tries to interactively authenticate the caller. On a normal desktop
+session this is handled by an agent the DE starts (gnome-shell,
+kwallet-polkit, …). On a minimal installation (SSH into a VM, no DE)
+no agent is running and the call fails with `Access denied` — polkit
+silently denies because it has no way to prompt.
+
+Two options for development:
+
+**Option (a): `pkttyagent` in the same shell.** Registers an agent for
+the current shell's PID; polkit then prompts for the password in the
+terminal:
+
+```sh
+pkttyagent --process $$ --notify-fd 3 3>&2 &
+# now run busctl ... in the same shell
+```
+
+This relies on the SSH session being a logind session — check with
+`loginctl show-session $XDG_SESSION_ID` if no prompt appears.
+
+**Option (b): permissive polkit rule (dev VM only).** Bypass the auth
+prompt entirely for `org.revenant.*` actions when the caller is in the
+`wheel` group:
+
+```sh
+sudoedit /etc/polkit-1/rules.d/49-revenant-dev.rules
+```
+
+```javascript
+// Dev-only: grant all org.revenant.* actions to wheel group without prompt.
+// Remove this file before testing the real auth-prompt flow via the GUI.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.revenant.") === 0 &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+No reload needed. **Remove the file** before testing the real
+prompt flow (which is what the GUI will actually exercise).
 
 ## Running
 
@@ -86,10 +142,12 @@ sudo RUST_LOG=info cargo run --bin revenantd
 Expected log lines on a healthy start:
 
 ```text
-revenantd 0.1.5 starting
+revenantd <version> starting
 mounted btrfs toplevel (/dev/disk/by-uuid/…) on /run/revenant/toplevel
 daemon ready
 registered org.revenant.Daemon1 on /org/revenant/Daemon
+snapshot watcher watching /run/revenant/toplevel/@snapshots
+config watcher watching /etc/revenant
 ```
 
 If the config is missing or the device cannot be mounted, the daemon
@@ -148,6 +206,11 @@ snapshots, with the `*`-marked anchor matching `GetLiveParent`'s
 # Privileged writes — all of these will trigger a polkit prompt the
 # first time, then re-use the cached auth (auth_admin_keep) for a
 # few minutes. Restore (auth_admin) re-prompts every time.
+#
+# All snapshot lookups are strain-scoped: the (strain, id) pair must
+# match what `ListSnapshots` reports. Passing the right id under the
+# wrong strain returns "snapshot not found" — by design, so a typo
+# in the strain name cannot accidentally hit a different namespace.
 
 # Edit retention: set strain "default" to last=5, daily=14, others
 # disabled. Note the array length (2) before the key/type/value
@@ -156,47 +219,52 @@ busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
     org.revenant.Daemon1 SetStrainRetention sa{sv} default 2 \
         last u 5 daily u 14
 
-# Take a snapshot (empty message → omitted in the sidecar).
+# Take a snapshot (empty message → omitted in the sidecar). The reply
+# contains the new id; substitute it into the Delete call below.
 busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
     org.revenant.Daemon1 CreateSnapshot ss default ""
 
-# Delete a snapshot by (strain, id).
+# Delete a snapshot by (strain, id). Replace 20260426-150156-977 with
+# the id printed by CreateSnapshot above.
 busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 DeleteSnapshot ss default 20260413-142200
+    org.revenant.Daemon1 DeleteSnapshot ss default 20260426-150156-977
 
-# Restore: dry-run first to see preflight findings without touching
-# anything (returns the same shape as a real restore, but with
-# dry_run=true and no state change).
+# Restore: pick a (strain, id) pair from `ListSnapshots`. Dry-run
+# first to inspect preflight findings without touching anything
+# (same reply shape as a real restore, but `dry_run=true` and no
+# state change).
 busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 Restore ssa{sv} default 20260413-142200 1 \
+    org.revenant.Daemon1 Restore ssa{sv} <strain> <id> 1 \
         dry_run b true
 
 # Real restore with save_current (this is the default; shown
-# explicitly here for completeness).
+# explicitly here for completeness). Captures the current state as
+# a pre-restore snapshot in the target strain before swapping over.
 busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 Restore ssa{sv} default 20260413-142200 1 \
+    org.revenant.Daemon1 Restore ssa{sv} <strain> <id> 1 \
         save_current b true
 ```
 
 ```sh
 # Watch live updates. Then in a third shell, run something like
-# `sudo revenantctl snapshot --strain manual -m test` and see a
+# `sudo revenantctl snapshot --strain default -m test` and see a
 # SnapshotsChanged signal appear here. After a Restore call, you
 # also see LiveParentChanged.
 busctl --system monitor org.revenant.Daemon1
 ```
 
-Confirm the mount actually happened:
+Confirm the mount actually happened. `/run/revenant/` is created with
+mode 0700 root, so these commands need sudo from a regular shell:
 
 ```sh
-findmnt /run/revenant/toplevel
+sudo findmnt /run/revenant/toplevel
 ```
 
 Then stop the daemon with `Ctrl+C`. The mount-point should disappear:
 
 ```sh
-findmnt /run/revenant/toplevel    # → no output
-ls /run/revenant/                 # → empty (or directory gone)
+sudo findmnt /run/revenant/toplevel    # → no output
+sudo ls /run/revenant/                 # → empty (or directory gone)
 ```
 
 ## Cleaning up
@@ -213,11 +281,13 @@ sudo umount /run/revenant/toplevel
 sudo rmdir /run/revenant/toplevel /run/revenant
 ```
 
-Removing the bus policy:
+Removing the policy files:
 
 ```sh
 sudo rm /etc/dbus-1/system.d/org.revenant.Daemon1.conf
-sudo systemctl reload dbus.service   # or: dbus-broker.service
+sudo rm /usr/share/polkit-1/actions/org.revenant.policy
+sudo rm -f /etc/polkit-1/rules.d/49-revenant-dev.rules   # if you used option (b)
+sudo systemctl reload dbus.service                       # or: dbus-broker.service
 ```
 
 ## What's not here yet

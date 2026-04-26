@@ -35,9 +35,14 @@ async fn main() -> Result<()> {
     // the D-Bus object; dropping the connection drops the object,
     // which drops the state, which umounts the toplevel.
     let state = state::DaemonState::initialize();
-    if let Some(reason) = &state.degraded {
-        tracing::warn!("daemon running in degraded state: {reason}");
-    } else {
+    let initial_state_label = match &state.degraded {
+        None => ("ready", String::new()),
+        Some(reason) => {
+            tracing::warn!("daemon running in degraded state: {reason}");
+            ("degraded", reason.to_string())
+        }
+    };
+    if initial_state_label.0 == "ready" {
         tracing::info!("daemon ready");
     }
 
@@ -66,12 +71,22 @@ async fn main() -> Result<()> {
 
     tracing::info!("registered {BUS_NAME} on {OBJECT_PATH}");
 
+    let object_path =
+        zvariant::OwnedObjectPath::try_from(OBJECT_PATH).context("encode object path")?;
+
+    // Announce the current state once via DaemonStateChanged. Clients
+    // that subscribed in time get the signal; everyone else uses
+    // GetDaemonInfo. The signal is the only mechanism that exists for
+    // future state transitions (lazy mount, idle exit), so wiring it
+    // now keeps the contract honest even though we don't yet flip
+    // state at runtime.
+    let (state_label, state_message) = initial_state_label;
+    emit_daemon_state_changed(&conn, &object_path, state_label, &state_message).await;
+
     // Live updates: only run the watchers when we actually have
     // something to watch. A degraded daemon is still usable for
     // metadata calls; it just won't push change notifications.
     if let Some(snap_dir) = snapshot_dir {
-        let object_path =
-            zvariant::OwnedObjectPath::try_from(OBJECT_PATH).context("encode object path")?;
         watcher::spawn(
             conn.clone(),
             object_path,
@@ -94,4 +109,29 @@ async fn main() -> Result<()> {
 
     tracing::info!("shutting down");
     Ok(())
+}
+
+/// Look up the served Daemon interface and emit `DaemonStateChanged`
+/// with the given (state, message). Failure is logged and swallowed
+/// so a missing subscriber never aborts startup.
+async fn emit_daemon_state_changed(
+    conn: &zbus::Connection,
+    object_path: &zvariant::OwnedObjectPath,
+    state: &str,
+    message: &str,
+) {
+    match conn
+        .object_server()
+        .interface::<_, dbus::Daemon>(object_path)
+        .await
+    {
+        Ok(iface) => {
+            if let Err(e) =
+                dbus::Daemon::daemon_state_changed(iface.signal_emitter(), state, message).await
+            {
+                tracing::warn!("emit DaemonStateChanged({state:?}): {e}");
+            }
+        }
+        Err(e) => tracing::warn!("lookup Daemon iface for DaemonStateChanged: {e}"),
+    }
 }

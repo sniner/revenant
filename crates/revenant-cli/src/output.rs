@@ -165,10 +165,10 @@ pub fn print_snapshot_list(
 
     // Leading 2-char column ("* " or "  ") keeps the rest of the table
     // aligned whether or not an anchor snapshot is present in the view.
-    // ID column is sized for the current 19-char form (YYYYMMDD-HHMMSS-NNN);
-    // legacy 15-char IDs simply get extra trailing padding.
-    println!("  {:<19} {:<12} Description", "ID", "Strain");
-    println!("{}", "-".repeat(64));
+    // ID column = 19-char ID + 2 trailing pad chars, giving a 3-char
+    // gap to the strain column with the literal separator space.
+    println!("  {:<21} {:<12} Description", "ID", "Strain");
+    println!("{}", "-".repeat(66));
 
     for snap in snapshots {
         let marker = if is_live_parent(snap) { '*' } else { ' ' };
@@ -177,7 +177,7 @@ pub fn print_snapshot_list(
             .as_ref()
             .map_or_else(|| "—".to_string(), metadata_summary);
         println!(
-            "{marker} {:<19} {:<12} {}",
+            "{marker} {:<21} {:<12} {}",
             snap.id, snap.strain, description
         );
     }

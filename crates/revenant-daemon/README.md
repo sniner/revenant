@@ -56,11 +56,18 @@ Without it, startup fails with `Permission denied: org.freedesktop.DBus.Error.Ac
 # From the repo root.
 
 # 1. D-Bus bus access policy. Defines who may own the bus name and who
-#    may call methods on it. Required.
+#    may call methods on it. Required. The mkdir is needed on minimal
+#    installs (e.g. Arch without a desktop environment) where the
+#    `dbus` package only ships /usr/share/dbus-1/system.d/ and the
+#    admin override dir is not created until something else needs it.
+#    Harmless on systems where the dir already exists.
+sudo mkdir -p /etc/dbus-1/system.d
 sudo install -m644 data/org.revenant.Daemon1.conf /etc/dbus-1/system.d/
 
-# 2. Reload the bus so it picks up the new policy.
-sudo systemctl reload dbus-broker.service   # or: dbus.service
+# 2. Reload the bus so it picks up the new policy. Use whichever unit
+#    is running on your system — `dbus.service` on Arch and Debian-
+#    based distros, `dbus-broker.service` on Fedora and recent SUSE.
+sudo systemctl reload dbus.service   # or: dbus-broker.service
 ```
 
 That's all that is required for development. The polkit policy
@@ -210,7 +217,7 @@ Removing the bus policy:
 
 ```sh
 sudo rm /etc/dbus-1/system.d/org.revenant.Daemon1.conf
-sudo systemctl reload dbus-broker.service
+sudo systemctl reload dbus.service   # or: dbus-broker.service
 ```
 
 ## What's not here yet

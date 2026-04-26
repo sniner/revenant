@@ -1,0 +1,66 @@
+# scriptlets for the revenant package
+#
+# The systemd units and the pacman alpm hook are not shipped as tracked
+# files: revenantctl generates them per-system (paths/strain names baked
+# in) so we let `revenantctl init --systemd --pacman` write them at
+# install time and remove them by name on uninstall. The base config at
+# /etc/revenant/config.toml is created on first install and deliberately
+# left in place on remove, so per-system tuning survives a reinstall.
+#
+# init is idempotent: existing strains are kept as-is, identical units
+# are left alone, differing units require --force to rewrite (we never
+# pass --force here, so user customisations are preserved across
+# upgrades).
+
+_run_init() {
+    # Detection touches /proc/mounts and the configured rootfs device.
+    # In odd install contexts (chroot without proper /proc, non-btrfs
+    # root) it can fail — we deliberately do not abort the package
+    # operation on that, just point the user at the manual command.
+    if /usr/bin/revenantctl init --systemd --pacman; then
+        return 0
+    else
+        echo
+        echo ":: 'revenantctl init' failed — likely no btrfs rootfs detected."
+        echo ":: Run 'sudo revenantctl init --systemd --pacman' manually once"
+        echo ":: the target environment is ready."
+        return 1
+    fi
+}
+
+post_install() {
+    _run_init || return 0
+
+    cat <<'EOF'
+
+:: To enable scheduled snapshots:
+::     systemctl enable --now revenant-periodic.timer
+:: Pre-transaction snapshots run automatically via the pacman hook.
+:: To opt out of pacman snapshots:
+::     rm /etc/pacman.d/hooks/50-revenant-snapshot.hook
+EOF
+}
+
+post_upgrade() {
+    _run_init || true
+}
+
+pre_remove() {
+    # Stop and disable the timer so systemd forgets about it before the
+    # unit files vanish. Errors are non-fatal — we still want to remove
+    # the files even if systemctl is unhappy.
+    systemctl disable --now revenant-periodic.timer 2>/dev/null || :
+    systemctl stop revenant-boot.service             2>/dev/null || :
+
+    # Remove the generated files. Leave /etc/revenant/ (config + any
+    # user data) alone.
+    rm -f /etc/systemd/system/revenant-boot.service
+    rm -f /etc/systemd/system/revenant-periodic.service
+    rm -f /etc/systemd/system/revenant-periodic.timer
+    rm -f /etc/pacman.d/hooks/50-revenant-snapshot.hook
+}
+
+post_remove() {
+    # Units lived under /etc/, where pacman's systemd hook does not look.
+    systemctl daemon-reload 2>/dev/null || :
+}

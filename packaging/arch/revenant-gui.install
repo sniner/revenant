@@ -1,0 +1,44 @@
+# scriptlets for the revenant-gui package
+#
+# What we DO need to do here:
+#   * Reload the system bus so it sees the new bus policy
+#     (/usr/share/dbus-1/system.d/org.revenant.Daemon1.conf) and the
+#     activation file (/usr/share/dbus-1/system-services/...).
+#   * Stop the running daemon on uninstall so its mount under
+#     /run/revenant/toplevel is cleanly torn down.
+#
+# What we DON'T need to do here:
+#   * systemctl daemon-reload — pacman's systemd hook handles that for
+#     anything in /usr/lib/systemd/system.
+#   * polkit reload — polkitd watches /usr/share/polkit-1/actions and
+#     reloads on inotify.
+#   * enable/start the daemon — D-Bus activation starts it on demand
+#     when the GUI (or any client) makes the first method call. If a
+#     user wants it always running, `systemctl enable --now
+#     revenant-daemon.service` is their call.
+
+_dbus_reload() {
+    # Either dbus.service or dbus-broker.service may be active
+    # depending on the host setup; reload whichever one responds.
+    systemctl reload dbus.service        2>/dev/null \
+        || systemctl reload dbus-broker.service 2>/dev/null \
+        || :
+}
+
+post_install() {
+    _dbus_reload
+}
+
+post_upgrade() {
+    _dbus_reload
+}
+
+pre_remove() {
+    # Best-effort stop. If the daemon is not running this is a no-op;
+    # if it crashes we still proceed so the package can be removed.
+    systemctl stop revenant-daemon.service 2>/dev/null || :
+}
+
+post_remove() {
+    _dbus_reload
+}

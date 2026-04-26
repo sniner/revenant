@@ -1,0 +1,114 @@
+# Maintainer: Stefan Schönberger
+#
+# Local-build PKGBUILD for revenant. Builds from the working tree:
+# the prepare() function copies the repo (Cargo manifests + crates +
+# data + config) into $srcdir, so you do not need a tagged release or
+# a published source tarball. Run from this directory:
+#
+#   makepkg -f
+#
+# The two resulting .pkg.tar.zst files (revenant + revenant-gui) end
+# up next to this PKGBUILD. The GUI binary is not built yet — the
+# revenant-gui package currently ships only the daemon plus its
+# D-Bus / polkit / systemd integration. Once the GUI is wired up,
+# extend build() to also compile -p revenant-gui and add the binary
+# + .desktop + icon to package_revenant-gui().
+
+pkgbase=revenant
+pkgname=(revenant revenant-gui)
+pkgver=0.1.6
+pkgrel=1
+arch=('x86_64')
+url='https://github.com/sniner/revenant'
+license=('GPL-3.0-only')
+makedepends=('cargo' 'rust')
+# !lto: cargo controls LTO via the release profile; makepkg's lto would fight it.
+# !debug: rust release builds carry no debuginfo, so the -debug subpackage would be empty.
+options=('!lto' '!debug')
+source=()
+sha256sums=()
+
+prepare() {
+    local repo="$startdir/../.."
+    rm -rf "$srcdir/$pkgbase"
+    mkdir -p "$srcdir/$pkgbase"
+    cp -a \
+        "$repo/Cargo.toml" \
+        "$repo/Cargo.lock" \
+        "$repo/crates" \
+        "$repo/config" \
+        "$repo/data" \
+        "$repo/LICENSE" \
+        "$repo/README.md" \
+        "$srcdir/$pkgbase/"
+
+    cd "$srcdir/$pkgbase"
+    export CARGO_HOME="$srcdir/cargo-home"
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$srcdir/$pkgbase"
+    export CARGO_HOME="$srcdir/cargo-home"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR="$srcdir/target"
+    # Strip $srcdir from paths embedded by file!()/module_path!() in
+    # panic messages of std and dependent crates — otherwise makepkg
+    # warns "Paket enthält einen Verweis auf $srcdir".
+    export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build --remap-path-prefix=$CARGO_HOME=/cargo"
+    # Build only the binaries we ship today. Adding -p revenant-gui will
+    # also pull in gtk4 / libadwaita as build deps, so do that step
+    # together with shipping the GUI binary.
+    cargo build --release --frozen \
+        -p revenant-cli \
+        -p revenant-daemon
+}
+
+package_revenant() {
+    pkgdesc='CLI for the Revenant snapshot tool (btrfs-based system rollback)'
+    depends=()
+    optdepends=('btrfs-progs: needed for any btrfs-root system, normally already installed')
+    install='revenant.install'
+
+    install -Dm755 "$srcdir/target/release/revenantctl" \
+        "$pkgdir/usr/bin/revenantctl"
+    install -Dm644 "$srcdir/$pkgbase/config/revenant.toml.example" \
+        "$pkgdir/usr/share/revenant/revenant.toml.example"
+    install -Dm644 "$srcdir/$pkgbase/LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_revenant-gui() {
+    pkgdesc='Privileged D-Bus daemon (and GUI, when ready) for the Revenant snapshot tool'
+    depends=("revenant=$pkgver-$pkgrel" 'dbus' 'polkit')
+    install='revenant-gui.install'
+
+    # Daemon binary.
+    install -Dm755 "$srcdir/target/release/revenantd" \
+        "$pkgdir/usr/bin/revenantd"
+
+    # systemd unit. /usr/lib/systemd/system is the vendor location;
+    # pacman's systemd hook triggers daemon-reload automatically.
+    install -Dm644 "$srcdir/$pkgbase/data/revenant-daemon.service" \
+        "$pkgdir/usr/lib/systemd/system/revenant-daemon.service"
+
+    # D-Bus system-bus policy. Vendor location, picked up by both
+    # dbus-daemon and dbus-broker. (The repo's README points at
+    # /etc/dbus-1/system.d/ for dev installs; for a package we
+    # use /usr/share/.)
+    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.Daemon1.conf" \
+        "$pkgdir/usr/share/dbus-1/system.d/org.revenant.Daemon1.conf"
+
+    # D-Bus service activation: lets clients trigger systemd to
+    # start revenant-daemon.service on the first method call.
+    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.Daemon1.service" \
+        "$pkgdir/usr/share/dbus-1/system-services/org.revenant.Daemon1.service"
+
+    # Polkit actions. polkitd watches this directory and reloads
+    # automatically; no scriptlet reload needed.
+    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.policy" \
+        "$pkgdir/usr/share/polkit-1/actions/org.revenant.policy"
+
+    install -Dm644 "$srcdir/$pkgbase/LICENSE" \
+        "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

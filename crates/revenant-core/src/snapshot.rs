@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Timelike, Utc};
 use serde::Serialize;
 
 use crate::backend::{FileSystemBackend, subvol_exists};
@@ -11,30 +11,67 @@ use crate::config::Config;
 use crate::error::{Result, RevenantError};
 use crate::metadata::{self, SnapshotMetadata, Trigger};
 
-/// Snapshot identifier based on UTC timestamp: YYYYMMDD-HHMMSS.
+/// Snapshot identifier based on UTC timestamp: `YYYYMMDD-HHMMSS-NNN`,
+/// where the trailing three digits are milliseconds. Legacy IDs without
+/// the millisecond suffix (`YYYYMMDD-HHMMSS`) are still accepted on read,
+/// so existing snapshots remain valid; new IDs are always emitted in the
+/// extended form.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct SnapshotId(String);
 
+/// Length of a legacy snapshot ID, `YYYYMMDD-HHMMSS`.
+const ID_LEN_LEGACY: usize = 15;
+
+/// Length of the current snapshot ID, `YYYYMMDD-HHMMSS-NNN`.
+const ID_LEN_CURRENT: usize = 19;
+
 impl SnapshotId {
-    /// Generate a new snapshot ID from the current UTC time.
+    /// Generate a new snapshot ID from the current UTC time, including
+    /// millisecond precision so that snapshots created back-to-back in
+    /// the same strain do not collide.
     #[must_use]
     pub fn now() -> Self {
-        let ts = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let ts = Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string();
         Self(ts)
     }
 
     /// Create a snapshot ID from a known string (e.g. parsed from subvolume name).
+    /// Accepts both the legacy 15-char form and the current 19-char form.
     pub fn from_string(s: &str) -> std::result::Result<Self, RevenantError> {
-        // Validate format: YYYYMMDD-HHMMSS
-        if s.len() != 15 || s.as_bytes()[8] != b'-' {
-            return Err(RevenantError::Other(format!(
-                "invalid snapshot ID format: {s}"
-            )));
+        match s.len() {
+            ID_LEN_CURRENT => {
+                if s.as_bytes()[8] != b'-' || s.as_bytes()[15] != b'-' {
+                    return Err(RevenantError::Other(format!(
+                        "invalid snapshot ID format: {s}"
+                    )));
+                }
+                let ms = &s[16..];
+                if !ms.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(RevenantError::Other(format!(
+                        "invalid snapshot ID milliseconds: {s}"
+                    )));
+                }
+                NaiveDateTime::parse_from_str(&s[..ID_LEN_LEGACY], "%Y%m%d-%H%M%S").map_err(
+                    |_| RevenantError::Other(format!("invalid snapshot ID timestamp: {s}")),
+                )?;
+            }
+            ID_LEN_LEGACY => {
+                if s.as_bytes()[8] != b'-' {
+                    return Err(RevenantError::Other(format!(
+                        "invalid snapshot ID format: {s}"
+                    )));
+                }
+                NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S").map_err(|_| {
+                    RevenantError::Other(format!("invalid snapshot ID timestamp: {s}"))
+                })?;
+            }
+            _ => {
+                return Err(RevenantError::Other(format!(
+                    "invalid snapshot ID format: {s}"
+                )));
+            }
         }
-        // Verify parseable as a timestamp
-        NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S")
-            .map_err(|_| RevenantError::Other(format!("invalid snapshot ID timestamp: {s}")))?;
         Ok(Self(s.to_string()))
     }
 
@@ -43,19 +80,52 @@ impl SnapshotId {
         &self.0
     }
 
-    /// Derive a UTC `DateTime` from the embedded timestamp.
+    /// Derive a UTC `DateTime` from the embedded timestamp. The
+    /// millisecond suffix, if any, is preserved in the returned value.
     #[must_use]
     pub fn created_at(&self) -> Option<DateTime<Utc>> {
-        NaiveDateTime::parse_from_str(&self.0, "%Y%m%d-%H%M%S")
-            .ok()
-            .map(|dt| dt.and_utc())
+        let (secs, ms) = if self.0.len() == ID_LEN_CURRENT {
+            (
+                &self.0[..ID_LEN_LEGACY],
+                self.0[ID_LEN_LEGACY + 1..].parse::<u32>().ok()?,
+            )
+        } else {
+            (self.0.as_str(), 0)
+        };
+        let dt = NaiveDateTime::parse_from_str(secs, "%Y%m%d-%H%M%S")
+            .ok()?
+            .and_utc();
+        dt.with_nanosecond(ms.checked_mul(1_000_000)?)
     }
 
     /// Build the snapshot subvolume name for a given source subvolume and strain.
-    /// E.g. source "@", strain "default", id "20260316-143022" → "@-default-20260316-143022"
+    /// E.g. source "@", strain "default", id "20260316-143022-456" →
+    /// "@-default-20260316-143022-456".
     #[must_use]
     pub fn snapshot_name(&self, subvol: &str, strain: &str) -> String {
         format!("{subvol}-{strain}-{}", self.0)
+    }
+
+    /// Extract a trailing snapshot ID from a string like
+    /// `"...-<strain>-<id>"`. Tries the current 19-char form first, then
+    /// the legacy 15-char form. Returns the parsed ID and the byte index
+    /// in `s` at which the ID begins (the byte at `start - 1` is the
+    /// `'-'` separator).
+    #[must_use]
+    pub fn extract_trailing(s: &str) -> Option<(Self, usize)> {
+        for &width in &[ID_LEN_CURRENT, ID_LEN_LEGACY] {
+            if s.len() < width + 2 {
+                continue;
+            }
+            let start = s.len() - width;
+            if s.as_bytes()[start - 1] != b'-' {
+                continue;
+            }
+            if let Ok(id) = Self::from_string(&s[start..]) {
+                return Some((id, start));
+            }
+        }
+        None
     }
 }
 
@@ -116,8 +186,9 @@ fn ensure_snapshot_dir(
 /// Discover all snapshots by scanning subvolumes on disk and matching against config.
 ///
 /// For each configured strain and its subvolumes, looks for subvolume names matching
-/// `{subvol}-{strain}-{YYYYMMDD-HHMMSS}`, groups by (strain, timestamp), and returns
-/// the list sorted chronologically.
+/// `{subvol}-{strain}-{id}` (where `id` is `YYYYMMDD-HHMMSS-NNN` or the legacy
+/// `YYYYMMDD-HHMMSS`), groups by (strain, id), and returns the list sorted
+/// chronologically.
 pub fn discover_snapshots(
     config: &Config,
     backend: &dyn FileSystemBackend,
@@ -213,9 +284,6 @@ pub struct LiveParentRef {
     pub strain: String,
 }
 
-/// Width of the `YYYYMMDD-HHMMSS` timestamp embedded in snapshot names.
-const ID_LEN: usize = 15;
-
 /// Identify the snapshot whose subvolume is the btrfs parent of the
 /// currently live rootfs subvolume.
 ///
@@ -275,14 +343,7 @@ pub fn resolve_live_parent(
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if rest.len() < ID_LEN + 2 {
-            continue;
-        }
-        let id_start = rest.len() - ID_LEN;
-        if rest.as_bytes()[id_start - 1] != b'-' {
-            continue;
-        }
-        let Ok(id) = SnapshotId::from_string(&rest[id_start..]) else {
+        let Some((id, id_start)) = SnapshotId::extract_trailing(rest) else {
             continue;
         };
         let strain = rest[..id_start - 1].to_string();
@@ -1149,12 +1210,20 @@ subvolumes = [{subvol_list}]
     #[test]
     fn snapshot_id_format() {
         let id = SnapshotId::now();
-        assert_eq!(id.as_str().len(), 15);
+        assert_eq!(id.as_str().len(), ID_LEN_CURRENT);
         assert_eq!(id.as_str().as_bytes()[8], b'-');
+        assert_eq!(id.as_str().as_bytes()[15], b'-');
+        assert!(id.as_str()[16..].bytes().all(|b| b.is_ascii_digit()));
     }
 
     #[test]
-    fn snapshot_id_parse() {
+    fn snapshot_id_parse_current() {
+        let id = SnapshotId::from_string("20260316-143022-456").unwrap();
+        assert_eq!(id.as_str(), "20260316-143022-456");
+    }
+
+    #[test]
+    fn snapshot_id_parse_legacy() {
         let id = SnapshotId::from_string("20260316-143022").unwrap();
         assert_eq!(id.as_str(), "20260316-143022");
     }
@@ -1163,28 +1232,72 @@ subvolumes = [{subvol_list}]
     fn snapshot_id_invalid() {
         assert!(SnapshotId::from_string("bad").is_err());
         assert!(SnapshotId::from_string("20261301-000000").is_err());
+        // Non-digit ms suffix
+        assert!(SnapshotId::from_string("20260316-143022-abc").is_err());
+        // Wrong separator between seconds and ms
+        assert!(SnapshotId::from_string("20260316-143022_456").is_err());
+        // Too short / too long
+        assert!(SnapshotId::from_string("20260316-14302").is_err());
+        assert!(SnapshotId::from_string("20260316-143022-4567").is_err());
+    }
+
+    #[test]
+    fn snapshot_id_orders_legacy_before_same_second_current() {
+        // Legacy IDs lack the ms suffix and must sort before any
+        // `<same second>-NNN` ID, so a strain that mixes formats is
+        // still ordered chronologically within the same second.
+        let legacy = SnapshotId::from_string("20260316-143022").unwrap();
+        let current = SnapshotId::from_string("20260316-143022-000").unwrap();
+        assert!(legacy < current);
     }
 
     #[test]
     fn snapshot_name_with_strain() {
-        let id = SnapshotId::from_string("20260316-143022").unwrap();
+        let id = SnapshotId::from_string("20260316-143022-456").unwrap();
         assert_eq!(
             id.snapshot_name("@", "default"),
-            "@-default-20260316-143022"
+            "@-default-20260316-143022-456"
         );
         assert_eq!(
             id.snapshot_name("@boot", "default"),
-            "@boot-default-20260316-143022"
+            "@boot-default-20260316-143022-456"
         );
     }
 
     #[test]
-    fn snapshot_id_created_at() {
+    fn snapshot_id_created_at_legacy() {
         let id = SnapshotId::from_string("20260316-143022").unwrap();
         let dt = id.created_at().unwrap();
         assert_eq!(
-            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-            "2026-03-16 14:30:22"
+            dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            "2026-03-16 14:30:22.000"
         );
+    }
+
+    #[test]
+    fn snapshot_id_created_at_current() {
+        let id = SnapshotId::from_string("20260316-143022-456").unwrap();
+        let dt = id.created_at().unwrap();
+        assert_eq!(
+            dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            "2026-03-16 14:30:22.456"
+        );
+    }
+
+    #[test]
+    fn extract_trailing_prefers_current_over_legacy() {
+        // A subvolume name carrying a current-form ID must parse as
+        // current, not as legacy with a 4-digit "ms" component bleeding
+        // into the strain.
+        let (id, start) = SnapshotId::extract_trailing("@-default-20260316-143022-456").unwrap();
+        assert_eq!(id.as_str(), "20260316-143022-456");
+        assert_eq!(start, "@-default-".len());
+    }
+
+    #[test]
+    fn extract_trailing_falls_back_to_legacy() {
+        let (id, start) = SnapshotId::extract_trailing("@-default-20260316-143022").unwrap();
+        assert_eq!(id.as_str(), "20260316-143022");
+        assert_eq!(start, "@-default-".len());
     }
 }

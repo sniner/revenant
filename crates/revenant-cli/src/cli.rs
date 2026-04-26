@@ -94,7 +94,7 @@ pub enum Command {
     },
     /// Restore a snapshot
     Restore {
-        /// Snapshot ID (format: YYYYMMDD-HHMMSS)
+        /// Snapshot ID (format: YYYYMMDD-HHMMSS-NNN, or legacy YYYYMMDD-HHMMSS)
         snapshot_id: String,
         /// Strain (required if snapshot ID exists in multiple strains)
         #[arg(short, long)]
@@ -119,7 +119,7 @@ pub enum Command {
     },
     /// Delete a snapshot (or all snapshots of a strain with --strain and --all)
     Delete {
-        /// Snapshot ID (format: YYYYMMDD-HHMMSS)
+        /// Snapshot ID (format: YYYYMMDD-HHMMSS-NNN, or legacy YYYYMMDD-HHMMSS)
         snapshot_id: Option<String>,
         /// Strain (required if snapshot ID exists in multiple strains, or with --all)
         #[arg(short, long)]

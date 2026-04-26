@@ -20,17 +20,15 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
+use chrono::{DateTime, FixedOffset, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::error::{Result, RevenantError};
+use crate::snapshot::SnapshotId;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const SIDECAR_EXTENSION: &str = ".meta.toml";
-
-/// Width of the `YYYYMMDD-HHMMSS` timestamp embedded in snapshot ids.
-const ID_LEN: usize = 15;
 
 /// What caused a snapshot to be taken.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,8 +178,9 @@ pub fn sidecar_path(snap_dir: &Path, strain: &str, id: &str) -> PathBuf {
     snap_dir.join(format!("{strain}-{id}{SIDECAR_EXTENSION}"))
 }
 
-/// Parse a sidecar file name of the form `<strain>-YYYYMMDD-HHMMSS.meta.toml`
-/// into its `(strain, id)` components.
+/// Parse a sidecar file name of the form `<strain>-<id>.meta.toml` into
+/// its `(strain, id)` components. The id is `YYYYMMDD-HHMMSS-NNN`
+/// (current) or `YYYYMMDD-HHMMSS` (legacy).
 ///
 /// Returns `None` if the file name does not match the expected shape.
 /// Strain names are restricted to `[a-zA-Z0-9_]` (no hyphens), mirroring
@@ -189,21 +188,7 @@ pub fn sidecar_path(snap_dir: &Path, strain: &str, id: &str) -> PathBuf {
 #[must_use]
 pub fn parse_sidecar_name(name: &str) -> Option<(String, String)> {
     let stem = name.strip_suffix(SIDECAR_EXTENSION)?;
-    // Minimum: 1 strain char + '-' + 15-char timestamp = 17 chars.
-    if stem.len() < ID_LEN + 2 {
-        return None;
-    }
-    let ts_start = stem.len() - ID_LEN;
-    let ts = &stem[ts_start..];
-    // Validate timestamp shape and parseability.
-    if ts.as_bytes().get(8) != Some(&b'-')
-        || NaiveDateTime::parse_from_str(ts, "%Y%m%d-%H%M%S").is_err()
-    {
-        return None;
-    }
-    if stem.as_bytes()[ts_start - 1] != b'-' {
-        return None;
-    }
+    let (id, ts_start) = SnapshotId::extract_trailing(stem)?;
     let strain = &stem[..ts_start - 1];
     if strain.is_empty()
         || !strain
@@ -212,7 +197,7 @@ pub fn parse_sidecar_name(name: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    Some((strain.to_string(), ts.to_string()))
+    Some((strain.to_string(), id.as_str().to_string()))
 }
 
 /// A sidecar file whose companion snapshot subvolume no longer exists.
@@ -362,10 +347,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_sidecar_name_accepts_valid() {
+    fn parse_sidecar_name_accepts_legacy_id() {
         let (strain, id) = parse_sidecar_name("default-20260316-143022.meta.toml").unwrap();
         assert_eq!(strain, "default");
         assert_eq!(id, "20260316-143022");
+    }
+
+    #[test]
+    fn parse_sidecar_name_accepts_current_id() {
+        let (strain, id) = parse_sidecar_name("default-20260316-143022-456.meta.toml").unwrap();
+        assert_eq!(strain, "default");
+        assert_eq!(id, "20260316-143022-456");
     }
 
     #[test]
@@ -383,6 +375,8 @@ mod tests {
         assert!(parse_sidecar_name("-20260316-143022.meta.toml").is_none());
         // Strain with a hyphen is not valid.
         assert!(parse_sidecar_name("a-b-20260316-143022.meta.toml").is_none());
+        // Non-digit ms suffix must not be accepted.
+        assert!(parse_sidecar_name("default-20260316-143022-abc.meta.toml").is_none());
     }
 
     #[test]

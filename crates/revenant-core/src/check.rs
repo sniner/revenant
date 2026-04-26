@@ -94,7 +94,9 @@ pub struct ParsedSnapshotName {
     pub id: SnapshotId,
 }
 
-/// Try to parse a subvolume entry name as `{subvol}-{strain}-{YYYYMMDD-HHMMSS}`.
+/// Try to parse a subvolume entry name as `{subvol}-{strain}-{id}`,
+/// where `id` is `YYYYMMDD-HHMMSS-NNN` (current) or `YYYYMMDD-HHMMSS`
+/// (legacy).
 ///
 /// Returns `None` if the name does not look like a revenant snapshot. Strain
 /// names are restricted to `[a-zA-Z0-9_]` (no hyphens), which makes the split
@@ -102,17 +104,7 @@ pub struct ParsedSnapshotName {
 /// timestamp separates them.
 #[must_use]
 pub fn parse_snapshot_name(name: &str) -> Option<ParsedSnapshotName> {
-    // Need at least: "x-y-YYYYMMDD-HHMMSS" → 1 + 1 + 1 + 15 = 18, but allow
-    // empty subvol later via the explicit checks below.
-    if name.len() < 18 {
-        return None;
-    }
-    let ts_start = name.len() - 15;
-    let ts_str = &name[ts_start..];
-    let id = SnapshotId::from_string(ts_str).ok()?;
-    if name.as_bytes()[ts_start - 1] != b'-' {
-        return None;
-    }
+    let (id, ts_start) = SnapshotId::extract_trailing(name)?;
     let prefix = &name[..ts_start - 1]; // "{subvol}-{strain}"
     let last_dash = prefix.rfind('-')?;
     let subvol = &prefix[..last_dash];
@@ -552,11 +544,19 @@ subvolumes = [{subvol_list}]
     // ----- parse_snapshot_name -----
 
     #[test]
-    fn parse_simple_name() {
+    fn parse_simple_name_legacy_id() {
         let p = parse_snapshot_name("@-default-20260316-143022").unwrap();
         assert_eq!(p.subvol, "@");
         assert_eq!(p.strain, "default");
         assert_eq!(p.id.as_str(), "20260316-143022");
+    }
+
+    #[test]
+    fn parse_simple_name_current_id() {
+        let p = parse_snapshot_name("@-default-20260316-143022-456").unwrap();
+        assert_eq!(p.subvol, "@");
+        assert_eq!(p.strain, "default");
+        assert_eq!(p.id.as_str(), "20260316-143022-456");
     }
 
     #[test]

@@ -165,8 +165,10 @@ pub fn print_snapshot_list(
 
     // Leading 2-char column ("* " or "  ") keeps the rest of the table
     // aligned whether or not an anchor snapshot is present in the view.
-    println!("  {:<17} {:<12} Description", "ID", "Strain");
-    println!("{}", "-".repeat(62));
+    // ID column is sized for the current 19-char form (YYYYMMDD-HHMMSS-NNN);
+    // legacy 15-char IDs simply get extra trailing padding.
+    println!("  {:<19} {:<12} Description", "ID", "Strain");
+    println!("{}", "-".repeat(64));
 
     for snap in snapshots {
         let marker = if is_live_parent(snap) { '*' } else { ' ' };
@@ -175,7 +177,7 @@ pub fn print_snapshot_list(
             .as_ref()
             .map_or_else(|| "—".to_string(), metadata_summary);
         println!(
-            "{marker} {:<17} {:<12} {}",
+            "{marker} {:<19} {:<12} {}",
             snap.id, snap.strain, description
         );
     }
@@ -316,11 +318,11 @@ pub fn print_retention_plan(mode: OutputMode, plan: &RetentionPlan) {
                             .map(revenant_core::retention::KeepReason::as_str)
                             .collect::<Vec<_>>()
                             .join(", ");
-                        println!("  KEEP    {}   {reason_str}", entry.id);
+                        println!("  KEEP    {:<19}   {reason_str}", entry.id);
                         total_kept += 1;
                     }
                     PlanAction::Delete => {
-                        println!("  DELETE  {}   no retention rule matches", entry.id);
+                        println!("  DELETE  {:<19}   no retention rule matches", entry.id);
                         total_delete += 1;
                     }
                 }

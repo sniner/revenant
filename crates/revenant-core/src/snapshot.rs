@@ -129,6 +129,34 @@ impl SnapshotId {
     }
 }
 
+/// Parse a snapshot subvolume name back into its `(subvol, strain, id)`
+/// components — the inverse of [`SnapshotId::snapshot_name`].
+///
+/// Strain names are constrained to `[a-zA-Z0-9_]` (no hyphens), so the
+/// last `-` before the trailing id separator is the subvol/strain
+/// boundary. Returns `None` for anything that isn't shaped like a
+/// snapshot subvolume name.
+#[must_use]
+pub fn parse_snapshot_subvol_name(name: &str) -> Option<(String, String, SnapshotId)> {
+    let (id, id_start) = SnapshotId::extract_trailing(name)?;
+    // `prefix` is "<subvol>-<strain>"; id_start points at the byte after
+    // the trailing '-' separator.
+    let prefix = &name[..id_start - 1];
+    let dash = prefix.rfind('-')?;
+    let subvol = &prefix[..dash];
+    let strain = &prefix[dash + 1..];
+    if subvol.is_empty() || strain.is_empty() {
+        return None;
+    }
+    if !strain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    Some((subvol.to_string(), strain.to_string(), id))
+}
+
 impl fmt::Display for SnapshotId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(&self.0)
@@ -1299,5 +1327,55 @@ subvolumes = [{subvol_list}]
         let (id, start) = SnapshotId::extract_trailing("@-default-20260316-143022").unwrap();
         assert_eq!(id.as_str(), "20260316-143022");
         assert_eq!(start, "@-default-".len());
+    }
+
+    // ----- parse_snapshot_subvol_name -----
+
+    #[test]
+    fn parse_subvol_name_simple() {
+        let (subvol, strain, id) =
+            parse_snapshot_subvol_name("@-default-20260316-143022-456").unwrap();
+        assert_eq!(subvol, "@");
+        assert_eq!(strain, "default");
+        assert_eq!(id.as_str(), "20260316-143022-456");
+    }
+
+    #[test]
+    fn parse_subvol_name_legacy_id() {
+        let (subvol, strain, id) =
+            parse_snapshot_subvol_name("@home-default-20260316-143022").unwrap();
+        assert_eq!(subvol, "@home");
+        assert_eq!(strain, "default");
+        assert_eq!(id.as_str(), "20260316-143022");
+    }
+
+    #[test]
+    fn parse_subvol_name_subvol_with_hyphen() {
+        // Subvol names may contain hyphens; strain names may not, so the
+        // last `-` before the id separator is unambiguously the boundary.
+        let (subvol, strain, _) =
+            parse_snapshot_subvol_name("@my-thing-default-20260316-143022-456").unwrap();
+        assert_eq!(subvol, "@my-thing");
+        assert_eq!(strain, "default");
+    }
+
+    #[test]
+    fn parse_subvol_name_rejects_garbage() {
+        assert!(parse_snapshot_subvol_name("random-thing").is_none());
+        assert!(parse_snapshot_subvol_name("20260316-143022").is_none());
+        assert!(parse_snapshot_subvol_name("@-default-20260316-bogus").is_none());
+        // Empty subvol or strain
+        assert!(parse_snapshot_subvol_name("-default-20260316-143022").is_none());
+        assert!(parse_snapshot_subvol_name("@--20260316-143022").is_none());
+    }
+
+    #[test]
+    fn parse_subvol_name_round_trips_snapshot_name() {
+        let id = SnapshotId::from_string("20260316-143022-456").unwrap();
+        let name = id.snapshot_name("@home", "periodic");
+        let (subvol, strain, parsed_id) = parse_snapshot_subvol_name(&name).unwrap();
+        assert_eq!(subvol, "@home");
+        assert_eq!(strain, "periodic");
+        assert_eq!(parsed_id, id);
     }
 }

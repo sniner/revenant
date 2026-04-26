@@ -16,6 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install GTK4 / libadwaita system deps
+        # revenant-gui pulls gtk4-rs / libadwaita-rs, which require
+        # gobject-2.0 / glib-2.0 / libadwaita-1 via pkg-config.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,6 +45,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install GTK4 / libadwaita system deps
+        # See note in the lint job — required to compile revenant-gui.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

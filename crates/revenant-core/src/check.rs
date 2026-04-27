@@ -224,7 +224,7 @@ pub fn find_orphaned_snapshots(
             )
         } else {
             format!(
-                "define strain.{} in the config and run `revenantctl delete --strain {} --all`, or remove manually",
+                "define strain.{} in the config and run `revenantctl delete {}@`, or remove manually",
                 parsed.strain, parsed.strain
             )
         };

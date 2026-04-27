@@ -67,10 +67,10 @@ impl From<TriggerKindArg> for revenant_core::metadata::TriggerKind {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Create a new snapshot
+    /// Create a new snapshot in the given strain.
     Snapshot {
-        /// Strain to use for the snapshot
-        #[arg(short, long, default_value = "default")]
+        /// Strain to snapshot. Defaults to `default`.
+        #[arg(default_value = "default")]
         strain: String,
         /// Optional free-form description stored in the snapshot's
         /// metadata sidecar. Useful for labelling manual snapshots.

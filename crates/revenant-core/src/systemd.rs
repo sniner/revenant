@@ -22,8 +22,10 @@ pub struct UnitFile {
 /// means renaming the unit file no longer requires a matching code
 /// change here — the running binary will always see the correct name.
 fn exec_start(bin_path: &Path, config_path: &Path, strain: &str, trigger: &str) -> String {
+    // Strain is the positional argument; `--trigger` / `--trigger-unit`
+    // remain flags because they carry metadata, not addressing.
     format!(
-        "{} --config {} snapshot --strain {} --trigger {} --trigger-unit %n",
+        "{} --config {} snapshot {} --trigger {} --trigger-unit %n",
         bin_path.display(),
         config_path.display(),
         strain,
@@ -128,7 +130,7 @@ mod tests {
         let content = &units[0].content;
         assert!(content.contains("Type=oneshot"));
         assert!(content.contains("WantedBy=multi-user.target"));
-        assert!(content.contains("snapshot --strain default"));
+        assert!(content.contains("snapshot default"));
         assert!(content.contains("/usr/local/bin/revenantctl --config /etc/revenant/config.toml"));
     }
 
@@ -137,7 +139,7 @@ mod tests {
         let units = generate_units(&test_params());
         let content = &units[1].content;
         assert!(content.contains("Type=oneshot"));
-        assert!(content.contains("snapshot --strain periodic"));
+        assert!(content.contains("snapshot periodic"));
         assert!(!content.contains("[Install]"));
     }
 
@@ -164,8 +166,8 @@ mod tests {
         params.boot_strain = "boot".to_string();
         params.periodic_strain = "hourly".to_string();
         let units = generate_units(&params);
-        assert!(units[0].content.contains("snapshot --strain boot"));
-        assert!(units[1].content.contains("snapshot --strain hourly"));
+        assert!(units[0].content.contains("snapshot boot"));
+        assert!(units[1].content.contains("snapshot hourly"));
     }
 
     #[test]

@@ -247,7 +247,7 @@ busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
 
 ```sh
 # Watch live updates. Then in a third shell, run something like
-# `sudo revenantctl snapshot --strain default -m test` and see a
+# `sudo revenantctl snapshot default -m test` and see a
 # SnapshotsChanged signal appear here. After a Restore call, you
 # also see LiveParentChanged.
 busctl --system monitor org.revenant.Daemon1

@@ -40,7 +40,7 @@ impl PackageManager for Pacman {
         // reads them when `--trigger pacman` is passed and records them
         // in the snapshot's metadata sidecar.
         let exec = format!(
-            "/bin/sh -c '{} --config {} snapshot --strain {} --trigger pacman || true'",
+            "/bin/sh -c '{} --config {} snapshot {} --trigger pacman || true'",
             params.bin_path.display(),
             params.config_path.display(),
             params.strain,
@@ -134,7 +134,7 @@ mod tests {
         let mut params = test_params();
         params.strain = "pacman-custom".to_string();
         let hooks = Pacman.generate_hooks(&params);
-        assert!(hooks[0].content.contains("snapshot --strain pacman-custom"));
+        assert!(hooks[0].content.contains("snapshot pacman-custom"));
     }
 
     #[test]

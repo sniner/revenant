@@ -1,11 +1,13 @@
 //! `revenant-gui` — GTK4/libadwaita frontend for the revenant snapshot tool.
 //!
-//! Slice state: 4f — strain sidebar, snapshot list with detail
+//! Slice state: 4e — strain sidebar, snapshot list with detail
 //! pane, strain-header action buttons (still placeholders for
 //! create/edit-retention), live signal subscriptions for
 //! SnapshotsChanged / LiveParentChanged / StrainConfigChanged /
-//! DaemonStateChanged. Restore flow (4e) is the next slice.
-//! Layout follows `docs/design/gui-wireframes.md`.
+//! DaemonStateChanged, and the privileged Restore flow (alert
+//! dialog → polkit → toast/banner). Retention editor (4d) is the
+//! remaining Phase 1 slice. Layout follows
+//! `docs/design/gui-wireframes.md`.
 
 mod client;
 mod dbus_thread;
@@ -41,6 +43,15 @@ struct AppState {
     /// reload so a refresh that doesn't drop the previously selected
     /// snapshot keeps the pane populated.
     selected_snapshot: Option<String>,
+    /// True between sending `Command::Restore` and receiving
+    /// `Event::RestoreResult`. Disables the Restore button so the
+    /// user cannot stack a second request behind a polkit prompt.
+    restore_in_flight: bool,
+    /// Toast displayed while a restore is being processed (polkit
+    /// auth + actual subvol work). Held so we can dismiss it the
+    /// moment the result arrives, before showing the success toast
+    /// or the error toast.
+    restore_progress_toast: Option<adw::Toast>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
@@ -71,6 +82,13 @@ struct Widgets {
     detail_created: gtk::Label,
     detail_pill_protected: gtk::Label,
     detail_pill_anchor: gtk::Label,
+    detail_restore_btn: gtk::Button,
+    /// Toast overlay wrapping the whole main content. Restore-flow
+    /// progress / success / failure messages are surfaced through it.
+    toast_overlay: adw::ToastOverlay,
+    /// Banner shown after a successful restore with a "Reboot now"
+    /// action. Hidden until a real (non-dry-run) restore returns.
+    reboot_banner: adw::Banner,
 }
 
 fn main() -> glib::ExitCode {
@@ -114,22 +132,59 @@ fn build_ui(app: &adw::Application) {
     root_stack.add_named(&status_page, Some("status"));
 
     let widgets = build_main_ui(&root_stack);
-    let widgets = Widgets {
-        root_stack: root_stack.clone(),
-        status_page: status_page.clone(),
-        ..widgets
-    };
 
+    // Reboot-required banner sits between header and content stack.
+    // Hidden by default; revealed on a successful (non-dry-run)
+    // restore. Action button kicks off `systemctl reboot` (which
+    // routes through logind + the user's desktop polkit agent —
+    // standard GNOME pattern, no special handling needed here).
+    let reboot_banner = adw::Banner::builder()
+        .title("System will boot from the restored snapshot at the next reboot.")
+        .button_label("Reboot now")
+        .revealed(false)
+        .build();
+
+    // Toast overlay wraps the entire main content so toasts appear
+    // above whatever's currently on screen, including the connecting
+    // status page.
+    let toast_overlay = adw::ToastOverlay::new();
     let outer = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
     outer.append(&header);
+    outer.append(&reboot_banner);
     outer.append(&root_stack);
-    window.set_content(Some(&outer));
+    toast_overlay.set_child(Some(&outer));
+
+    let widgets = Widgets {
+        root_stack: root_stack.clone(),
+        status_page: status_page.clone(),
+        toast_overlay: toast_overlay.clone(),
+        reboot_banner: reboot_banner.clone(),
+        ..widgets
+    };
+
+    window.set_content(Some(&toast_overlay));
     window.present();
 
+    // Reboot banner action: the user has just successfully restored
+    // and is ready to reboot. logind's polkit policy normally lets
+    // any logged-in graphical user reboot without password — if it
+    // doesn't, the spawned process surfaces the polkit prompt.
+    {
+        reboot_banner.connect_button_clicked(move |_banner| {
+            tracing::info!("user clicked Reboot now — invoking systemctl reboot");
+            if let Err(e) = std::process::Command::new("systemctl")
+                .arg("reboot")
+                .spawn()
+            {
+                tracing::error!("failed to spawn `systemctl reboot`: {e}");
+            }
+        });
+    }
+
     let handles = dbus_thread::spawn();
-    wire_event_loop(widgets, handles);
+    wire_event_loop(window.clone(), widgets, handles);
 }
 
 /// Build the sidebar+content layout. Returns the populated `Widgets`
@@ -300,7 +355,12 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
 
     Widgets {
         root_stack: root_stack.clone(),
-        status_page: adw::StatusPage::new(), // placeholder, overwritten by caller
+        // The next four are placeholders overwritten by build_ui; they
+        // belong to the toast-overlay/banner/window layer wrapping the
+        // main UI and aren't built here.
+        status_page: adw::StatusPage::new(),
+        toast_overlay: adw::ToastOverlay::new(),
+        reboot_banner: adw::Banner::builder().build(),
         strain_list,
         snapshot_stack,
         snapshot_list,
@@ -319,6 +379,7 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         detail_created: detail_widgets.created,
         detail_pill_protected: detail_widgets.pill_protected,
         detail_pill_anchor: detail_widgets.pill_anchor,
+        detail_restore_btn: detail_widgets.restore_btn,
     }
 }
 
@@ -336,6 +397,7 @@ struct DetailWidgets {
     created: gtk::Label,
     pill_protected: gtk::Label,
     pill_anchor: gtk::Label,
+    restore_btn: gtk::Button,
 }
 
 /// Build the right-hand snapshot detail pane. Two children in a
@@ -413,9 +475,9 @@ fn build_detail_pane() -> DetailWidgets {
     grid.attach(&kv_label("Created"), 0, 2, 1, 1);
     grid.attach(&created, 1, 2, 1, 1);
 
-    // Restore button is wired in slice 4e; Delete is Phase 2 and
-    // stays insensitive. Both rendered now so the pane has its
-    // final shape and the later wiring is just an event hookup.
+    // Restore button: enabled by `apply_detail` whenever a snapshot
+    // is shown; click handler attached in `wire_event_loop` so it
+    // can capture state + cmd_tx + parent-window references.
     let restore_btn = gtk::Button::builder()
         .label("Restore…")
         .css_classes(["suggested-action", "pill"])
@@ -481,6 +543,7 @@ fn build_detail_pane() -> DetailWidgets {
         created,
         pill_protected,
         pill_anchor,
+        restore_btn,
     }
 }
 
@@ -501,7 +564,7 @@ fn make_kv_value() -> gtk::Label {
         .build()
 }
 
-fn wire_event_loop(widgets: Widgets, handles: Handles) {
+fn wire_event_loop(window: adw::ApplicationWindow, widgets: Widgets, handles: Handles) {
     let state = Rc::new(RefCell::new(AppState::default()));
     let cmd_tx = handles.commands.clone();
 
@@ -558,6 +621,31 @@ fn wire_event_loop(widgets: Widgets, handles: Handles) {
                 }
                 None => clear_detail(&widgets_for_cb, &state),
             });
+    }
+
+    // Restore button: open the AdwAlertDialog. Confirmation handler
+    // dispatches Command::Restore; the actual restore is async and
+    // comes back via Event::RestoreResult. Polkit prompt happens
+    // inside the daemon while we're awaiting the call.
+    {
+        let state = Rc::clone(&state);
+        let cmd_tx = cmd_tx.clone();
+        let widgets_for_cb = widgets.clone();
+        let window_for_cb = window.clone();
+        widgets.detail_restore_btn.connect_clicked(move |_| {
+            let st = state.borrow();
+            if st.restore_in_flight {
+                return;
+            }
+            let Some(snap_id) = st.selected_snapshot.clone() else {
+                return;
+            };
+            let Some(snap) = st.snapshots.iter().find(|s| s.id == snap_id).cloned() else {
+                return;
+            };
+            drop(st);
+            present_restore_dialog(&window_for_cb, &widgets_for_cb, &state, &cmd_tx, &snap);
+        });
     }
 
     let widgets_for_events = widgets;
@@ -636,6 +724,161 @@ fn apply_event(
                     let _ = cmd_tx.send_blocking(Command::LoadSnapshots(sel));
                 }
             }
+        }
+        Event::RestoreResult { strain, id, result } => {
+            apply_restore_result(widgets, state, &strain, &id, result);
+        }
+    }
+}
+
+/// Build and present the AdwAlertDialog for a Restore action. The
+/// dialog has two checkboxes (`save_current`, `dry_run`) following
+/// the wireframe; on confirmation it dispatches a `Command::Restore`
+/// and hands the in-flight bookkeeping to the result handler.
+fn present_restore_dialog(
+    parent: &adw::ApplicationWindow,
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    cmd_tx: &async_channel::Sender<Command>,
+    snap: &Snapshot,
+) {
+    let heading = "Restore snapshot?";
+    let body = format!(
+        "{} · {}\n\n\
+         {}\n\n\
+         This will replace the current system state. The running \
+         system will be rolled back at the next reboot.",
+        snap.strain,
+        format_created_full(snap),
+        snap.message.as_deref().unwrap_or("(no message)"),
+    );
+
+    let dialog = adw::AlertDialog::builder()
+        .heading(heading)
+        .body(body)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("restore", "Restore");
+    dialog.set_response_appearance("restore", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    // Extra child: two checkboxes laid out vertically with the
+    // copy from the wireframe. `save_current` defaults to true
+    // (recommended); `dry_run` defaults to false.
+    let save_check = gtk::CheckButton::builder()
+        .label("Save the current state as a snapshot first")
+        .active(true)
+        .build();
+    let save_hint = gtk::Label::builder()
+        .label("Recommended — lets you undo this restore.")
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .margin_start(28)
+        .build();
+    let dry_check = gtk::CheckButton::builder()
+        .label("Dry run (plan only, do not execute)")
+        .active(false)
+        .build();
+    let extra = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .margin_top(8)
+        .build();
+    extra.append(&save_check);
+    extra.append(&save_hint);
+    extra.append(&dry_check);
+    dialog.set_extra_child(Some(&extra));
+
+    let snap_strain = snap.strain.clone();
+    let snap_id = snap.id.clone();
+    let widgets = widgets.clone();
+    let state = Rc::clone(state);
+    let cmd_tx = cmd_tx.clone();
+    dialog.connect_response(None, move |_dlg, response| {
+        if response != "restore" {
+            return;
+        }
+        let save_current = save_check.is_active();
+        let dry_run = dry_check.is_active();
+
+        // Mark in-flight before sending so the result handler can
+        // assume the start state when it clears the flag.
+        {
+            let mut st = state.borrow_mut();
+            st.restore_in_flight = true;
+        }
+        widgets.detail_restore_btn.set_sensitive(false);
+
+        let progress_label = if dry_run {
+            "Running preflight checks…"
+        } else {
+            "Restoring snapshot — waiting for authentication…"
+        };
+        let toast = adw::Toast::builder()
+            .title(progress_label)
+            .timeout(0) // 0 = do not auto-dismiss; cleared by RestoreResult
+            .build();
+        widgets.toast_overlay.add_toast(toast.clone());
+        state.borrow_mut().restore_progress_toast = Some(toast);
+
+        let _ = cmd_tx.send_blocking(Command::Restore {
+            strain: snap_strain.clone(),
+            id: snap_id.clone(),
+            save_current,
+            dry_run,
+        });
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn apply_restore_result(
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    req_strain: &str,
+    req_id: &str,
+    result: Result<crate::model::RestoreOutcome, String>,
+) {
+    {
+        let mut st = state.borrow_mut();
+        st.restore_in_flight = false;
+        if let Some(toast) = st.restore_progress_toast.take() {
+            toast.dismiss();
+        }
+    }
+    // Re-enable the Restore button when there's still a selection.
+    if state.borrow().selected_snapshot.is_some() {
+        widgets.detail_restore_btn.set_sensitive(true);
+    }
+
+    match result {
+        Ok(outcome) if outcome.dry_run => {
+            // Dry-run: no live state changed. We surface the outcome
+            // as a single toast — full preflight-findings rendering
+            // is deferred (the daemon already includes them in the
+            // result dict, but a proper findings dialog is its own
+            // little design).
+            let toast = adw::Toast::new("Dry run complete — preflight passed. No changes applied.");
+            widgets.toast_overlay.add_toast(toast);
+        }
+        Ok(outcome) => {
+            let extra = match outcome.pre_restore {
+                Some((strain, id)) => format!(" · pre-restore: {strain}@{id}"),
+                None => String::new(),
+            };
+            let title = format!(
+                "Restore complete — {strain}@{id}{extra}",
+                strain = outcome.restored_strain,
+                id = outcome.restored_id,
+            );
+            widgets.toast_overlay.add_toast(adw::Toast::new(&title));
+            widgets.reboot_banner.set_revealed(true);
+        }
+        Err(reason) => {
+            tracing::warn!("Restore({req_strain}, {req_id}) failed: {reason}");
+            let toast = adw::Toast::new(&format!("Restore failed: {reason}"));
+            widgets.toast_overlay.add_toast(toast);
         }
     }
 }
@@ -883,6 +1126,8 @@ fn strain_subvols_for(state: &AppState, strain: &str) -> Vec<String> {
 fn clear_detail(widgets: &Widgets, state: &Rc<RefCell<AppState>>) {
     state.borrow_mut().selected_snapshot = None;
     widgets.detail_stack.set_visible_child_name("empty");
+    // Restore button has no target without a selection.
+    widgets.detail_restore_btn.set_sensitive(false);
 }
 
 fn apply_detail(widgets: &Widgets, snap: &Snapshot, strain_subvols: &[String]) {
@@ -917,6 +1162,12 @@ fn apply_detail(widgets: &Widgets, snap: &Snapshot, strain_subvols: &[String]) {
             strain_subvols.join(", ")
         });
     widgets.detail_created.set_label(&format_created_full(snap));
+
+    // Restore button is sensitive whenever a snapshot is shown.
+    // While a restore is in flight, the click handler no-ops on
+    // `state.restore_in_flight`, and the result handler toggles
+    // the sensitivity itself — apply_detail doesn't need to know.
+    widgets.detail_restore_btn.set_sensitive(true);
 
     widgets.detail_stack.set_visible_child_name("populated");
 }

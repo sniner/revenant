@@ -35,7 +35,7 @@ use async_channel::{Receiver, Sender, bounded, unbounded};
 use futures_util::StreamExt;
 
 use crate::client::Client;
-use crate::model::{LiveParent, Snapshot, Strain};
+use crate::model::{LiveParent, RestoreOutcome, Snapshot, Strain};
 use crate::proxy::{DaemonProxy, Dict};
 
 /// Events pushed from the worker to the GUI thread.
@@ -68,6 +68,18 @@ pub enum Event {
     /// shown, so the worker forwards the signal verbatim and lets
     /// the GUI decide whether to issue a follow-up `LoadSnapshots`.
     SignalSnapshotsChanged(String),
+    /// Result of a privileged `Restore` call. Polkit prompt happens
+    /// inside the daemon; this fires once the user has responded to
+    /// it and the restore (or dry-run) is finished. `Err` covers
+    /// polkit-cancel, preflight-blocked, and generic failures alike.
+    RestoreResult {
+        /// Echo of the request — the GUI uses this to confirm the
+        /// banner refers to the snapshot the user actually clicked,
+        /// not a stale earlier request.
+        strain: String,
+        id: String,
+        result: Result<RestoreOutcome, String>,
+    },
 }
 
 /// Commands sent from the GUI to the worker.
@@ -76,6 +88,15 @@ pub enum Command {
     /// Fetch the snapshot list for a strain. Worker replies with
     /// `Event::Snapshots`.
     LoadSnapshots(String),
+    /// Issue a privileged `Restore` call. Worker replies with
+    /// `Event::RestoreResult`. The polkit prompt is the daemon's
+    /// problem; this future just awaits its outcome.
+    Restore {
+        strain: String,
+        id: String,
+        save_current: bool,
+        dry_run: bool,
+    },
 }
 
 /// Worker handle returned to the GUI thread.
@@ -259,6 +280,17 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
             let result = list_snapshots_for(client, &strain).await;
             let _ = evt_tx.send(Event::Snapshots { strain, result }).await;
         }
+        Command::Restore {
+            strain,
+            id,
+            save_current,
+            dry_run,
+        } => {
+            let result = restore(client, &strain, &id, save_current, dry_run).await;
+            let _ = evt_tx
+                .send(Event::RestoreResult { strain, id, result })
+                .await;
+        }
     }
 }
 
@@ -276,4 +308,31 @@ async fn list_snapshots_for(client: &Client, strain: &str) -> Result<Vec<Snapsho
         .await
         .map_err(|e| format!("{e}"))?;
     Ok(raw.iter().filter_map(Snapshot::from_dict).collect())
+}
+
+async fn restore(
+    client: &Client,
+    strain: &str,
+    id: &str,
+    save_current: bool,
+    dry_run: bool,
+) -> Result<RestoreOutcome, String> {
+    let mut options: Dict = HashMap::new();
+    let mut put_bool = |k: &str, v: bool| -> Result<(), String> {
+        let owned = zvariant::Value::new(v)
+            .try_to_owned()
+            .map_err(|e| format!("encode option {k}: {e}"))?;
+        options.insert(k.to_string(), owned);
+        Ok(())
+    };
+    put_bool("save_current", save_current)?;
+    put_bool("dry_run", dry_run)?;
+
+    let raw = client
+        .proxy()
+        .restore(strain, id, options)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    RestoreOutcome::from_dict(&raw)
+        .ok_or_else(|| "daemon returned malformed Restore result dict".to_string())
 }

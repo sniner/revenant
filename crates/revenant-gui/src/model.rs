@@ -81,6 +81,43 @@ impl LiveParent {
     }
 }
 
+/// Decoded form of the dict returned by `Restore(...)`. The wire
+/// shape is documented in `docs/design/dbus-interface.md`; here we
+/// keep only the bits the UI surfaces.
+#[derive(Debug, Clone)]
+pub struct RestoreOutcome {
+    pub restored_strain: String,
+    pub restored_id: String,
+    /// `Some((strain, id))` when `save_current` was true and a
+    /// pre-restore snapshot was created. The wireframe surfaces it
+    /// so the user knows where to return to.
+    pub pre_restore: Option<(String, String)>,
+    /// True when the daemon ran in dry-run mode — no live state
+    /// changed, only the preflight findings are meaningful.
+    pub dry_run: bool,
+}
+
+impl RestoreOutcome {
+    pub fn from_dict(d: &Dict) -> Option<Self> {
+        let restored_strain = read_str(d, "restored_strain")?.to_string();
+        let restored_id = read_str(d, "restored_id")?.to_string();
+        let dry_run = read_bool(d, "dry_run").unwrap_or(false);
+        let pre_restore = match (
+            read_str(d, "pre_restore_strain"),
+            read_str(d, "pre_restore_id"),
+        ) {
+            (Some(s), Some(i)) => Some((s.to_string(), i.to_string())),
+            _ => None,
+        };
+        Some(Self {
+            restored_strain,
+            restored_id,
+            pre_restore,
+            dry_run,
+        })
+    }
+}
+
 fn read_str<'a>(dict: &'a Dict, key: &str) -> Option<&'a str> {
     dict.get(key).and_then(|v| <&str>::try_from(v).ok())
 }

@@ -1,12 +1,10 @@
 //! `revenant-gui` — GTK4/libadwaita frontend for the revenant snapshot tool.
 //!
-//! Slice state: 4e — strain sidebar, snapshot list with detail
-//! pane, strain-header action buttons (still placeholders for
-//! create/edit-retention), live signal subscriptions for
-//! SnapshotsChanged / LiveParentChanged / StrainConfigChanged /
-//! DaemonStateChanged, and the privileged Restore flow (alert
-//! dialog → polkit → toast/banner). Retention editor (4d) is the
-//! remaining Phase 1 slice. Layout follows
+//! Slice state: 4d — Phase 1 GUI is feature-complete: strain
+//! sidebar, snapshot list, detail pane, strain-header action
+//! buttons (retention editor wired; create-snapshot still
+//! pending), live signal subscriptions, privileged Restore flow,
+//! and per-strain retention editor (this slice). Layout follows
 //! `docs/design/gui-wireframes.md`.
 
 mod client;
@@ -21,7 +19,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::dbus_thread::{Command, Event, Handles};
-use crate::model::{LiveParent, Snapshot, Strain};
+use crate::model::{LiveParent, Retention, Snapshot, Strain};
 use crate::proxy::Dict;
 
 const APP_ID: &str = "org.revenant.Gui";
@@ -83,6 +81,8 @@ struct Widgets {
     detail_pill_protected: gtk::Label,
     detail_pill_anchor: gtk::Label,
     detail_restore_btn: gtk::Button,
+    /// `✎` button on the strain header — opens the retention editor.
+    strain_btn_retention: gtk::Button,
     /// Toast overlay wrapping the whole main content. Restore-flow
     /// progress / success / failure messages are surfaced through it.
     toast_overlay: adw::ToastOverlay,
@@ -380,6 +380,7 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         detail_pill_protected: detail_widgets.pill_protected,
         detail_pill_anchor: detail_widgets.pill_anchor,
         detail_restore_btn: detail_widgets.restore_btn,
+        strain_btn_retention,
     }
 }
 
@@ -623,6 +624,27 @@ fn wire_event_loop(window: adw::ApplicationWindow, widgets: Widgets, handles: Ha
             });
     }
 
+    // Retention editor: open the preferences-style AdwAlertDialog
+    // with the current tier values for the selected strain. Save
+    // dispatches Command::SetRetention; the result comes back via
+    // Event::RetentionResult.
+    {
+        let state = Rc::clone(&state);
+        let cmd_tx = cmd_tx.clone();
+        let window_for_cb = window.clone();
+        widgets.strain_btn_retention.connect_clicked(move |_| {
+            let st = state.borrow();
+            let Some(name) = st.selected_strain.clone() else {
+                return;
+            };
+            let Some(strain) = st.strains.iter().find(|s| s.name == name).cloned() else {
+                return;
+            };
+            drop(st);
+            present_retention_dialog(&window_for_cb, &cmd_tx, &strain);
+        });
+    }
+
     // Restore button: open the AdwAlertDialog. Confirmation handler
     // dispatches Command::Restore; the actual restore is async and
     // comes back via Event::RestoreResult. Polkit prompt happens
@@ -727,6 +749,9 @@ fn apply_event(
         }
         Event::RestoreResult { strain, id, result } => {
             apply_restore_result(widgets, state, &strain, &id, result);
+        }
+        Event::RetentionResult { strain, result } => {
+            apply_retention_result(widgets, &strain, result);
         }
     }
 }
@@ -1186,5 +1211,180 @@ fn format_created_full(snap: &Snapshot) -> String {
             Err(_) => rfc.clone(),
         },
         None => snap.id.clone(),
+    }
+}
+
+/// Build and present the retention-editor dialog for `strain`. Six
+/// AdwSpinRows in an AdwPreferencesGroup (one per tier), wrapped in
+/// an AdwAlertDialog so we get the standard Cancel/Save button row
+/// without hand-rolling a toolbar. Save dispatches a
+/// `Command::SetRetention`; the daemon's reply comes back via
+/// `Event::RetentionResult` and is rendered as a toast.
+fn present_retention_dialog(
+    parent: &adw::ApplicationWindow,
+    cmd_tx: &async_channel::Sender<Command>,
+    strain: &Strain,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!("Retention — {}", strain.name))
+        .body(
+            "Snapshots are kept according to tiered policies. A snapshot \
+             is retained as long as any tier still claims it. Set a tier \
+             to 0 to disable it.",
+        )
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    // Six tiers in an AdwPreferencesGroup for the rounded-card look
+    // that the wireframe sketches. AdwSpinRow takes its bounds via
+    // GtkAdjustment. Upper bound 9999 is well past anything sensible
+    // and keeps the spin button compact; the daemon clamps anyway.
+    let group = adw::PreferencesGroup::builder().build();
+    let spin = |label: &str, sub: &str, init: u32| -> adw::SpinRow {
+        let adj = gtk::Adjustment::new(f64::from(init), 0.0, 9999.0, 1.0, 10.0, 0.0);
+        adw::SpinRow::builder()
+            .title(label)
+            .subtitle(sub)
+            .adjustment(&adj)
+            .numeric(true)
+            .build()
+    };
+    let row_last = spin(
+        "Last",
+        "Most recent snapshots, regardless of age.",
+        strain.retention.last,
+    );
+    let row_hourly = spin(
+        "Hourly",
+        "Newest per clock-hour for N hours.",
+        strain.retention.hourly,
+    );
+    let row_daily = spin(
+        "Daily",
+        "Newest per calendar-day for N days.",
+        strain.retention.daily,
+    );
+    let row_weekly = spin(
+        "Weekly",
+        "Newest per ISO-week for N weeks.",
+        strain.retention.weekly,
+    );
+    let row_monthly = spin(
+        "Monthly",
+        "Newest per calendar-month for N months.",
+        strain.retention.monthly,
+    );
+    let row_yearly = spin(
+        "Yearly",
+        "Newest per calendar-year for N years.",
+        strain.retention.yearly,
+    );
+    group.add(&row_last);
+    group.add(&row_hourly);
+    group.add(&row_daily);
+    group.add(&row_weekly);
+    group.add(&row_monthly);
+    group.add(&row_yearly);
+
+    // Contextual footgun warning. Visible only when `last == 0` and
+    // any longer tier is active — matches the same-day-eviction edge
+    // case kept-by-design (see project memory). Re-evaluated whenever
+    // any spinner changes.
+    let warning = gtk::Label::builder()
+        .label(
+            "⚠ With Last = 0 and only longer tiers active, a same-day \
+             pre-restore snapshot can evict an older same-day pick.",
+        )
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["caption", "warning"])
+        .margin_top(8)
+        .visible(false)
+        .build();
+
+    let extra = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    extra.append(&group);
+    extra.append(&warning);
+    dialog.set_extra_child(Some(&extra));
+
+    // Reactive footgun visibility. Each spin row reports value
+    // changes via notify::value; clone the row handles into the
+    // closure so we can read them all on each tick. Initial state is
+    // computed once after construction.
+    {
+        // Hourly is intentionally not part of the footgun rule
+        // (same-second/hour eviction isn't the failure mode the
+        // warning is about); only daily and longer tiers matter.
+        let r_last = row_last.clone();
+        let r_daily = row_daily.clone();
+        let r_weekly = row_weekly.clone();
+        let r_monthly = row_monthly.clone();
+        let r_yearly = row_yearly.clone();
+        let warning = warning.clone();
+        let recompute = move || {
+            let trip = r_last.value() as u32 == 0
+                && (r_daily.value() as u32 > 0
+                    || r_weekly.value() as u32 > 0
+                    || r_monthly.value() as u32 > 0
+                    || r_yearly.value() as u32 > 0);
+            warning.set_visible(trip);
+        };
+        recompute();
+        for row in [
+            &row_last,
+            &row_hourly,
+            &row_daily,
+            &row_weekly,
+            &row_monthly,
+            &row_yearly,
+        ] {
+            let cb = recompute.clone();
+            row.connect_notify_local(Some("value"), move |_, _| cb());
+        }
+    }
+
+    let strain_name = strain.name.clone();
+    let cmd_tx = cmd_tx.clone();
+    dialog.connect_response(None, move |_dlg, response| {
+        if response != "save" {
+            return;
+        }
+        let retention = Retention {
+            last: row_last.value() as u32,
+            hourly: row_hourly.value() as u32,
+            daily: row_daily.value() as u32,
+            weekly: row_weekly.value() as u32,
+            monthly: row_monthly.value() as u32,
+            yearly: row_yearly.value() as u32,
+        };
+        let _ = cmd_tx.send_blocking(Command::SetRetention {
+            strain: strain_name.clone(),
+            retention,
+        });
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn apply_retention_result(widgets: &Widgets, strain: &str, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("Retention saved for {strain}")));
+        }
+        Err(reason) => {
+            tracing::warn!("SetStrainRetention({strain}) failed: {reason}");
+            widgets.toast_overlay.add_toast(adw::Toast::new(&format!(
+                "Save failed for {strain}: {reason}"
+            )));
+        }
     }
 }

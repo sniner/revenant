@@ -18,6 +18,37 @@ pub struct Strain {
     pub name: String,
     pub subvolumes: Vec<String>,
     pub efi: bool,
+    pub retention: Retention,
+}
+
+/// Tiered retention policy for one strain. All tiers are unsigned
+/// counts; `0` disables a tier. Mirrors `RetainConfig` in core, but
+/// kept independent so the GUI doesn't have to depend on the core
+/// crate just for one struct.
+///
+/// Wire shape (per `dbus-interface.md`): each tier is a `u` in the
+/// `retention` `a{sv}`; missing keys default to `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Retention {
+    pub last: u32,
+    pub hourly: u32,
+    pub daily: u32,
+    pub weekly: u32,
+    pub monthly: u32,
+    pub yearly: u32,
+}
+
+impl Retention {
+    fn from_dict(d: &Dict) -> Self {
+        Self {
+            last: read_u32(d, "last").unwrap_or(0),
+            hourly: read_u32(d, "hourly").unwrap_or(0),
+            daily: read_u32(d, "daily").unwrap_or(0),
+            weekly: read_u32(d, "weekly").unwrap_or(0),
+            monthly: read_u32(d, "monthly").unwrap_or(0),
+            yearly: read_u32(d, "yearly").unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,11 +74,12 @@ pub struct LiveParent {
 
 impl Strain {
     pub fn from_tuple(t: StrainTuple) -> Self {
-        let (name, subvolumes, efi, _retain) = t;
+        let (name, subvolumes, efi, retain) = t;
         Self {
             name,
             subvolumes,
             efi,
+            retention: Retention::from_dict(&retain),
         }
     }
 }
@@ -124,4 +156,8 @@ fn read_str<'a>(dict: &'a Dict, key: &str) -> Option<&'a str> {
 
 fn read_bool(dict: &Dict, key: &str) -> Option<bool> {
     dict.get(key).and_then(|v| bool::try_from(v).ok())
+}
+
+fn read_u32(dict: &Dict, key: &str) -> Option<u32> {
+    dict.get(key).and_then(|v| u32::try_from(v).ok())
 }

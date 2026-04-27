@@ -35,7 +35,7 @@ use async_channel::{Receiver, Sender, bounded, unbounded};
 use futures_util::StreamExt;
 
 use crate::client::Client;
-use crate::model::{LiveParent, RestoreOutcome, Snapshot, Strain};
+use crate::model::{LiveParent, RestoreOutcome, Retention, Snapshot, Strain};
 use crate::proxy::{DaemonProxy, Dict};
 
 /// Events pushed from the worker to the GUI thread.
@@ -80,6 +80,13 @@ pub enum Event {
         id: String,
         result: Result<RestoreOutcome, String>,
     },
+    /// Result of a `SetStrainRetention` call. Echoes the strain so
+    /// the dialog's response handler can match the result up to the
+    /// dialog instance that issued it.
+    RetentionResult {
+        strain: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Commands sent from the GUI to the worker.
@@ -96,6 +103,14 @@ pub enum Command {
         id: String,
         save_current: bool,
         dry_run: bool,
+    },
+    /// Update a strain's retention policy. Worker replies with
+    /// `Event::RetentionResult`. The daemon emits
+    /// `StrainConfigChanged` on success, so 4f's signal handler
+    /// re-fetches the strain list automatically.
+    SetRetention {
+        strain: String,
+        retention: Retention,
     },
 }
 
@@ -291,6 +306,10 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
                 .send(Event::RestoreResult { strain, id, result })
                 .await;
         }
+        Command::SetRetention { strain, retention } => {
+            let result = set_retention(client, &strain, retention).await;
+            let _ = evt_tx.send(Event::RetentionResult { strain, result }).await;
+        }
     }
 }
 
@@ -308,6 +327,29 @@ async fn list_snapshots_for(client: &Client, strain: &str) -> Result<Vec<Snapsho
         .await
         .map_err(|e| format!("{e}"))?;
     Ok(raw.iter().filter_map(Snapshot::from_dict).collect())
+}
+
+async fn set_retention(client: &Client, strain: &str, retention: Retention) -> Result<(), String> {
+    let mut dict: Dict = HashMap::new();
+    let mut put_u32 = |k: &str, v: u32| -> Result<(), String> {
+        let owned = zvariant::Value::new(v)
+            .try_to_owned()
+            .map_err(|e| format!("encode tier {k}: {e}"))?;
+        dict.insert(k.to_string(), owned);
+        Ok(())
+    };
+    put_u32("last", retention.last)?;
+    put_u32("hourly", retention.hourly)?;
+    put_u32("daily", retention.daily)?;
+    put_u32("weekly", retention.weekly)?;
+    put_u32("monthly", retention.monthly)?;
+    put_u32("yearly", retention.yearly)?;
+
+    client
+        .proxy()
+        .set_strain_retention(strain, dict)
+        .await
+        .map_err(|e| format!("{e}"))
 }
 
 async fn restore(

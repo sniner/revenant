@@ -2,28 +2,40 @@
 #
 # The systemd units and the pacman alpm hook are not shipped as tracked
 # files: revenantctl generates them per-system (paths/strain names baked
-# in) so we let `revenantctl init --systemd --pacman` write them at
-# install time and remove them by name on uninstall. The base config at
-# /etc/revenant/config.toml is created on first install and deliberately
-# left in place on remove, so per-system tuning survives a reinstall.
+# in) so we let `revenantctl init --systemd --pacman --force` write
+# them at install time and remove them by name on uninstall. The base
+# config at /etc/revenant/config.toml is created on first install and
+# deliberately left in place on remove, so per-system tuning survives
+# a reinstall.
 #
-# init is idempotent: existing strains are kept as-is, identical units
-# are left alone, differing units require --force to rewrite (we never
-# pass --force here, so user customisations are preserved across
-# upgrades).
+# `--force` only governs the generated unit/hook files; an existing
+# config.toml is never overwritten — strains we add (boot/periodic/
+# pacman) are merged in idempotently. We pass `--force` because the
+# generated files' content depends on the resolved bin path: switching
+# from a manual install (/usr/local/bin/revenantctl) to the package
+# (/usr/bin/revenantctl), or any future change in the unit template,
+# would otherwise make the writer bail. Site-local tweaks belong in
+# systemd drop-ins under /etc/systemd/system/<unit>.d/, which `--force`
+# does not touch.
 
 _run_init() {
     # Detection touches /proc/mounts and the configured rootfs device.
     # In odd install contexts (chroot without proper /proc, non-btrfs
     # root) it can fail — we deliberately do not abort the package
     # operation on that, just point the user at the manual command.
-    if /usr/bin/revenantctl init --systemd --pacman; then
+    if /usr/bin/revenantctl init --systemd --pacman --force; then
+        # Generated units live in /etc/systemd/system/, which pacman's
+        # systemd hook does not watch (it only triggers on changes
+        # under /usr/lib/systemd/system/). Reload here or systemd
+        # keeps the stale ExecStart= path after a binary-location
+        # change, which is exactly the bug we are fixing.
+        systemctl daemon-reload 2>/dev/null || :
         return 0
     else
         echo
         echo ":: 'revenantctl init' failed — likely no btrfs rootfs detected."
-        echo ":: Run 'sudo revenantctl init --systemd --pacman' manually once"
-        echo ":: the target environment is ready."
+        echo ":: Run 'sudo revenantctl init --systemd --pacman --force' manually"
+        echo ":: once the target environment is ready, then 'systemctl daemon-reload'."
         return 1
     fi
 }

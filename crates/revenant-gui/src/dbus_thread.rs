@@ -87,6 +87,14 @@ pub enum Event {
         strain: String,
         result: Result<(), String>,
     },
+    /// Result of a privileged `CreateSnapshot` call. On success
+    /// carries the freshly-created snapshot's typed form so the GUI
+    /// can name it in the success toast without re-fetching. The
+    /// list itself updates via `SnapshotsChanged` (slice 4f).
+    CreateSnapshotResult {
+        strain: String,
+        result: Result<Snapshot, String>,
+    },
 }
 
 /// Commands sent from the GUI to the worker.
@@ -112,6 +120,11 @@ pub enum Command {
         strain: String,
         retention: Retention,
     },
+    /// Issue a privileged `CreateSnapshot` call. Worker replies with
+    /// `Event::CreateSnapshotResult`. Polkit prompt happens inside
+    /// the daemon. `message` is passed verbatim — empty string is
+    /// the daemon's "no message" sentinel.
+    CreateSnapshot { strain: String, message: String },
 }
 
 /// Worker handle returned to the GUI thread.
@@ -310,7 +323,23 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
             let result = set_retention(client, &strain, retention).await;
             let _ = evt_tx.send(Event::RetentionResult { strain, result }).await;
         }
+        Command::CreateSnapshot { strain, message } => {
+            let result = create_snapshot(client, &strain, &message).await;
+            let _ = evt_tx
+                .send(Event::CreateSnapshotResult { strain, result })
+                .await;
+        }
     }
+}
+
+async fn create_snapshot(client: &Client, strain: &str, message: &str) -> Result<Snapshot, String> {
+    let raw = client
+        .proxy()
+        .create_snapshot(strain, message)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Snapshot::from_dict(&raw)
+        .ok_or_else(|| "daemon returned malformed CreateSnapshot result dict".to_string())
 }
 
 async fn list_snapshots_for(client: &Client, strain: &str) -> Result<Vec<Snapshot>, String> {

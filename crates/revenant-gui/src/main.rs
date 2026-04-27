@@ -1,11 +1,11 @@
 //! `revenant-gui` — GTK4/libadwaita frontend for the revenant snapshot tool.
 //!
-//! Slice state: 4d — Phase 1 GUI is feature-complete: strain
+//! Slice state: 4g — Phase 1 GUI is feature-complete: strain
 //! sidebar, snapshot list, detail pane, strain-header action
-//! buttons (retention editor wired; create-snapshot still
-//! pending), live signal subscriptions, privileged Restore flow,
-//! and per-strain retention editor (this slice). Layout follows
-//! `docs/design/gui-wireframes.md`.
+//! buttons (both retention editor and create-snapshot wired),
+//! live signal subscriptions, privileged Restore flow, retention
+//! editor, and create-snapshot dialog (this slice). Layout
+//! follows `docs/design/gui-wireframes.md`.
 
 mod client;
 mod dbus_thread;
@@ -50,6 +50,15 @@ struct AppState {
     /// moment the result arrives, before showing the success toast
     /// or the error toast.
     restore_progress_toast: Option<adw::Toast>,
+    /// True between sending `Command::CreateSnapshot` and receiving
+    /// `Event::CreateSnapshotResult`. Same purpose as
+    /// `restore_in_flight` — gates the strain-header `+` button so a
+    /// second click during the polkit prompt doesn't queue a second
+    /// snapshot request.
+    create_in_flight: bool,
+    /// Toast displayed while a CreateSnapshot is being processed.
+    /// Same dismissal pattern as `restore_progress_toast`.
+    create_progress_toast: Option<adw::Toast>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
@@ -83,6 +92,10 @@ struct Widgets {
     detail_restore_btn: gtk::Button,
     /// `✎` button on the strain header — opens the retention editor.
     strain_btn_retention: gtk::Button,
+    /// `+` button on the strain header — opens the create-snapshot
+    /// dialog. The new snapshot lands in the currently-selected
+    /// strain.
+    strain_btn_create: gtk::Button,
     /// Toast overlay wrapping the whole main content. Restore-flow
     /// progress / success / failure messages are surfaced through it.
     toast_overlay: adw::ToastOverlay,
@@ -381,6 +394,7 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         detail_pill_anchor: detail_widgets.pill_anchor,
         detail_restore_btn: detail_widgets.restore_btn,
         strain_btn_retention,
+        strain_btn_create,
     }
 }
 
@@ -645,6 +659,28 @@ fn wire_event_loop(window: adw::ApplicationWindow, widgets: Widgets, handles: Ha
         });
     }
 
+    // Create-snapshot: open the dialog with a single optional
+    // message field. The strain is implicit (the one in the
+    // header). Confirm dispatches Command::CreateSnapshot; result
+    // arrives via Event::CreateSnapshotResult.
+    {
+        let state = Rc::clone(&state);
+        let cmd_tx = cmd_tx.clone();
+        let widgets_for_cb = widgets.clone();
+        let window_for_cb = window.clone();
+        widgets.strain_btn_create.connect_clicked(move |_| {
+            let st = state.borrow();
+            if st.create_in_flight {
+                return;
+            }
+            let Some(name) = st.selected_strain.clone() else {
+                return;
+            };
+            drop(st);
+            present_create_snapshot_dialog(&window_for_cb, &widgets_for_cb, &state, &cmd_tx, &name);
+        });
+    }
+
     // Restore button: open the AdwAlertDialog. Confirmation handler
     // dispatches Command::Restore; the actual restore is async and
     // comes back via Event::RestoreResult. Polkit prompt happens
@@ -752,6 +788,9 @@ fn apply_event(
         }
         Event::RetentionResult { strain, result } => {
             apply_retention_result(widgets, &strain, result);
+        }
+        Event::CreateSnapshotResult { strain, result } => {
+            apply_create_snapshot_result(widgets, state, &strain, result);
         }
     }
 }
@@ -1385,6 +1424,102 @@ fn apply_retention_result(widgets: &Widgets, strain: &str, result: Result<(), St
             widgets.toast_overlay.add_toast(adw::Toast::new(&format!(
                 "Save failed for {strain}: {reason}"
             )));
+        }
+    }
+}
+
+/// Present the create-snapshot dialog. AdwAlertDialog with one
+/// AdwEntryRow for the optional message; strain is implicit (from
+/// the header, passed in as `strain`). Trigger is implicitly
+/// `manual` — the daemon hardcodes that for D-Bus CreateSnapshot.
+fn present_create_snapshot_dialog(
+    parent: &adw::ApplicationWindow,
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    cmd_tx: &async_channel::Sender<Command>,
+    strain: &str,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!("Create snapshot in {strain}?"))
+        .body(
+            "A new snapshot of this strain's subvolumes will be \
+             created and recorded as a manual snapshot. You can \
+             optionally tag it with a short message.",
+        )
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("create", "Create");
+    dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("create"));
+    dialog.set_close_response("cancel");
+
+    // AdwEntryRow inside an AdwPreferencesGroup matches the
+    // rounded-card style of the retention dialog.
+    let message_row = adw::EntryRow::builder().title("Message (optional)").build();
+    let group = adw::PreferencesGroup::builder().build();
+    group.add(&message_row);
+    dialog.set_extra_child(Some(&group));
+
+    let strain_for_cb = strain.to_string();
+    let widgets_for_cb = widgets.clone();
+    let state_for_cb = Rc::clone(state);
+    let cmd_tx_for_cb = cmd_tx.clone();
+    dialog.connect_response(None, move |_dlg, response| {
+        if response != "create" {
+            return;
+        }
+        let message = message_row.text().to_string();
+
+        // Mark in-flight + disable the `+` button so a second click
+        // during the polkit prompt can't queue a duplicate request.
+        state_for_cb.borrow_mut().create_in_flight = true;
+        widgets_for_cb.strain_btn_create.set_sensitive(false);
+
+        let toast = adw::Toast::builder()
+            .title("Creating snapshot — waiting for authentication…")
+            .timeout(0)
+            .build();
+        widgets_for_cb.toast_overlay.add_toast(toast.clone());
+        state_for_cb.borrow_mut().create_progress_toast = Some(toast);
+
+        let _ = cmd_tx_for_cb.send_blocking(Command::CreateSnapshot {
+            strain: strain_for_cb.clone(),
+            message,
+        });
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn apply_create_snapshot_result(
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    strain: &str,
+    result: Result<Snapshot, String>,
+) {
+    {
+        let mut st = state.borrow_mut();
+        st.create_in_flight = false;
+        if let Some(t) = st.create_progress_toast.take() {
+            t.dismiss();
+        }
+    }
+    widgets.strain_btn_create.set_sensitive(true);
+
+    match result {
+        Ok(snap) => {
+            widgets.toast_overlay.add_toast(adw::Toast::new(&format!(
+                "Snapshot created: {}@{}",
+                snap.strain, snap.id
+            )));
+            // The list itself refreshes through 4f's
+            // SnapshotsChanged subscription; nothing to do here.
+        }
+        Err(reason) => {
+            tracing::warn!("CreateSnapshot({strain}) failed: {reason}");
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("Create failed: {reason}")));
         }
     }
 }

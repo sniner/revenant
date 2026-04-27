@@ -31,3 +31,8 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 # Runtime-agnostic channel: the dbus-worker pushes events from a
 # tokio runtime, the GTK side drains on the glib MainContext.
 async-channel = "2"
+
+# StreamExt for `.next()` on zbus signal streams. zbus pulls
+# futures-util in transitively but we depend on it directly to keep
+# the import explicit.
+futures-util = "0.3"

@@ -16,17 +16,27 @@
 //! Reconnect scope for slice 4b: retry the initial bus connect with
 //! a fixed 5 s backoff. Once connected, the worker pushes the
 //! initial fetches and then services commands. Detecting daemon
-//! death mid-session and rebuilding the proxy is deferred to the
-//! signal slice (4f) where it actually matters.
+//! death mid-session and rebuilding the proxy is deferred — D-Bus
+//! activation re-spawns revenantd on the next method call, and the
+//! existing zbus connection survives across that.
+//!
+//! Signal subscriptions (slice 4f): once connected, the worker
+//! spawns one tokio task per signal stream from the daemon. Each
+//! task pushes follow-up Events back across the same channel, so
+//! the GUI side reacts to live updates the same way it reacts to
+//! initial fetches — no separate code path. The streams stay
+//! alive for the lifetime of the runtime; dropping the worker
+//! thread cleans everything up.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use async_channel::{Receiver, Sender, bounded, unbounded};
+use futures_util::StreamExt;
 
 use crate::client::Client;
 use crate::model::{LiveParent, Snapshot, Strain};
-use crate::proxy::Dict;
+use crate::proxy::{DaemonProxy, Dict};
 
 /// Events pushed from the worker to the GUI thread.
 #[derive(Debug)]
@@ -36,11 +46,14 @@ pub enum Event {
     /// Connect attempt failed; the worker will keep retrying.
     /// Carries the human-readable reason for the latest attempt.
     Disconnected(String),
-    /// Result of the initial `GetDaemonInfo` call.
+    /// Result of `GetDaemonInfo` (initial call or refresh after a
+    /// `DaemonStateChanged` signal).
     DaemonInfo(Result<Dict, String>),
-    /// Result of `ListStrains`.
+    /// Result of `ListStrains` (initial call or refresh after a
+    /// `StrainConfigChanged` signal).
     Strains(Result<Vec<Strain>, String>),
-    /// Result of `GetLiveParent`. `Ok(None)` is the empty-dict
+    /// Result of `GetLiveParent` (initial call or refresh after a
+    /// `LiveParentChanged` signal). `Ok(None)` is the empty-dict
     /// sentinel ("pristine system / anchor lost").
     LiveParent(Result<Option<LiveParent>, String>),
     /// Result of `ListSnapshots(strain)`. The strain is echoed back
@@ -50,6 +63,11 @@ pub enum Event {
         strain: String,
         result: Result<Vec<Snapshot>, String>,
     },
+    /// Daemon emitted `SnapshotsChanged(strain)`. Empty `strain`
+    /// means "any/all". Only the GUI knows which strain is currently
+    /// shown, so the worker forwards the signal verbatim and lets
+    /// the GUI decide whether to issue a follow-up `LoadSnapshots`.
+    SignalSnapshotsChanged(String),
 }
 
 /// Commands sent from the GUI to the worker.
@@ -103,10 +121,110 @@ async fn run_loop(evt_tx: Sender<Event>, cmd_rx: Receiver<Command>) {
     };
     let _ = evt_tx.send(Event::Connected).await;
 
+    // Spawn the signal-subscription tasks BEFORE the initial fetches.
+    // zbus's MatchRule for each signal is added when the stream is
+    // first awaited; emitting initial-state events afterwards avoids
+    // a (small) window where a SnapshotsChanged from a concurrent
+    // CLI snapshot creation would slip past us. The tasks then keep
+    // the GUI in sync for the rest of the session.
+    spawn_signal_listeners(client.proxy(), evt_tx.clone()).await;
+
     fetch_initial(&client, &evt_tx).await;
 
     while let Ok(cmd) = cmd_rx.recv().await {
         handle_command(&client, &evt_tx, cmd).await;
+    }
+}
+
+/// Subscribe to all four daemon signals and spawn one tokio task
+/// per stream. Each task forwards into the same `Event` channel the
+/// GUI already drains, so the live-update path reuses the existing
+/// rendering code paths. The `proxy` is cloned per task because
+/// zbus's signal-driven re-fetches need their own handle.
+async fn spawn_signal_listeners(proxy: &DaemonProxy<'static>, evt_tx: Sender<Event>) {
+    // SnapshotsChanged → forwarded as-is; the GUI knows which strain
+    // is currently shown.
+    match proxy.receive_snapshots_changed().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            tokio::spawn(async move {
+                while let Some(sig) = stream.next().await {
+                    let strain = sig.args().map(|a| a.strain).unwrap_or_default();
+                    if evt_tx
+                        .send(Event::SignalSnapshotsChanged(strain))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe SnapshotsChanged: {e}"),
+    }
+
+    // LiveParentChanged → re-fetch GetLiveParent and emit the same
+    // event the initial fetch produces; GUI's existing handler does
+    // the rest.
+    match proxy.receive_live_parent_changed().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            let proxy = proxy.clone();
+            tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    let live = proxy
+                        .get_live_parent()
+                        .await
+                        .map(|d| LiveParent::from_dict(&d))
+                        .map_err(|e| format!("{e}"));
+                    if evt_tx.send(Event::LiveParent(live)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe LiveParentChanged: {e}"),
+    }
+
+    // StrainConfigChanged → re-fetch ListStrains.
+    match proxy.receive_strain_config_changed().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            let proxy = proxy.clone();
+            tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    let strains = proxy
+                        .list_strains()
+                        .await
+                        .map(|v| v.into_iter().map(Strain::from_tuple).collect())
+                        .map_err(|e| format!("{e}"));
+                    if evt_tx.send(Event::Strains(strains)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe StrainConfigChanged: {e}"),
+    }
+
+    // DaemonStateChanged → re-fetch GetDaemonInfo. The signal
+    // payload is a (state, message) string pair; we ignore it and
+    // resync the full info dict so the footer stays consistent with
+    // any other key (version, backend, toplevel_mounted).
+    match proxy.receive_daemon_state_changed().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            let proxy = proxy.clone();
+            tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    let info = proxy.get_daemon_info().await.map_err(|e| format!("{e}"));
+                    if evt_tx.send(Event::DaemonInfo(info)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe DaemonStateChanged: {e}"),
     }
 }
 

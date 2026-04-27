@@ -1,9 +1,10 @@
 //! `revenant-gui` — GTK4/libadwaita frontend for the revenant snapshot tool.
 //!
-//! Slice state: 4c — strain sidebar, flat snapshot list, live-state
-//! footer, detail pane, strain-header action buttons (still
-//! placeholders for create/edit-retention). Restore flow (4e) and
-//! live signal subscriptions (4f) come in subsequent slices.
+//! Slice state: 4f — strain sidebar, snapshot list with detail
+//! pane, strain-header action buttons (still placeholders for
+//! create/edit-retention), live signal subscriptions for
+//! SnapshotsChanged / LiveParentChanged / StrainConfigChanged /
+//! DaemonStateChanged. Restore flow (4e) is the next slice.
 //! Layout follows `docs/design/gui-wireframes.md`.
 
 mod client;
@@ -624,6 +625,18 @@ fn apply_event(
         Event::Snapshots { strain, result } => {
             apply_snapshots(widgets, state, &strain, result);
         }
+        Event::SignalSnapshotsChanged(strain) => {
+            // Empty payload from the daemon means "any/all" — reload
+            // whichever strain we're currently showing. A specific
+            // strain only triggers a reload when it matches; otherwise
+            // we'd thrash the off-screen list and lose user time.
+            let selected = state.borrow().selected_strain.clone();
+            if let Some(sel) = selected {
+                if strain.is_empty() || strain == sel {
+                    let _ = cmd_tx.send_blocking(Command::LoadSnapshots(sel));
+                }
+            }
+        }
     }
 }
 
@@ -657,27 +670,41 @@ fn apply_strains(
         widgets.strain_list.append(&row);
     }
 
+    // Preserve the user's selection across refreshes (e.g. when a
+    // StrainConfigChanged signal triggers a re-fetch): keep the
+    // currently-selected strain if it survived in the new list,
+    // otherwise fall back to the first.
+    let prev_selected = state.borrow().selected_strain.clone();
     state.borrow_mut().strains = strains.clone();
 
-    if let Some(first) = strains.first() {
-        // Auto-select the first strain so the user lands on something
-        // immediately. `select_row` re-emits row-selected, which sends
-        // the LoadSnapshots command; no need to dispatch here.
-        if let Some(row) = widgets.strain_list.row_at_index(0) {
-            widgets.strain_list.select_row(Some(&row));
+    let target_idx = prev_selected
+        .as_deref()
+        .and_then(|sel| strains.iter().position(|s| s.name == sel))
+        .or(if strains.is_empty() { None } else { Some(0) });
+
+    match target_idx {
+        Some(idx) => {
+            if let Some(row) = widgets.strain_list.row_at_index(idx as i32) {
+                widgets.strain_list.select_row(Some(&row));
+            }
+            let target_name = strains[idx].name.clone();
+            // `select_row` may not re-emit row-selected if the row
+            // was already selected; do the fetch unconditionally so
+            // a refresh always reflects the freshest snapshot list
+            // and the just-loaded strain config.
+            if state.borrow().selected_strain.as_deref() != Some(target_name.as_str()) {
+                select_strain(state, widgets, &target_name);
+            }
+            let _ = cmd_tx.send_blocking(Command::LoadSnapshots(target_name));
         }
-        // Defensive: if select_row didn't fire (already selected), make
-        // sure we still kick off the initial snapshot fetch.
-        if state.borrow().selected_strain.as_deref() != Some(first.name.as_str()) {
-            select_strain(state, widgets, &first.name);
-            let _ = cmd_tx.send_blocking(Command::LoadSnapshots(first.name.clone()));
+        None => {
+            widgets.content_title.set_label("");
+            widgets
+                .snapshot_empty
+                .set_description(Some("No strains configured."));
+            widgets.snapshot_stack.set_visible_child_name("empty");
+            state.borrow_mut().selected_strain = None;
         }
-    } else {
-        widgets.content_title.set_label("");
-        widgets
-            .snapshot_empty
-            .set_description(Some("No strains configured."));
-        widgets.snapshot_stack.set_visible_child_name("empty");
     }
 }
 

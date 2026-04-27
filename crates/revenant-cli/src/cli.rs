@@ -86,19 +86,24 @@ pub enum Command {
         #[arg(long, hide = true)]
         trigger_unit: Option<String>,
     },
-    /// List all snapshots
+    /// List snapshots, optionally filtered by strain (e.g. `default@`).
     List {
-        /// Filter by strain name
-        #[arg(short, long)]
-        strain: Option<String>,
+        /// Optional filter:
+        ///   `strain@`     — show only snapshots in that strain
+        ///   `strain@all`  — alias for `strain@`
+        ///   omitted       — show every snapshot
+        ///
+        /// `strain@ID` and bare `ID` forms are also accepted and shown
+        /// as a single-row list, useful for confirming a snapshot's
+        /// metadata.
+        target: Option<String>,
     },
-    /// Restore a snapshot
+    /// Restore a snapshot. The target is `strain@ID` (fully qualified) or a
+    /// bare `ID` (auto-resolved across strains; ambiguous IDs error).
     Restore {
-        /// Snapshot ID (format: YYYYMMDD-HHMMSS-NNN, or legacy YYYYMMDD-HHMMSS)
-        snapshot_id: String,
-        /// Strain (required if snapshot ID exists in multiple strains)
-        #[arg(short, long)]
-        strain: Option<String>,
+        /// `strain@ID` or bare `ID`. The bulk forms (`strain@`,
+        /// `strain@all`) are rejected — restore acts on one snapshot.
+        target: String,
         /// Confirm the destructive restore. Without this flag, the
         /// command only prints what would happen and exits with code 1.
         #[arg(long)]
@@ -113,20 +118,21 @@ pub enum Command {
         /// manual-triggered snapshot) before replacing it, so the user
         /// has a named, retained copy to return to if the restore turns
         /// out to be unwanted. Equivalent to running `revenantctl
-        /// snapshot --strain <target-strain>` just before `restore`.
+        /// snapshot <target-strain>` just before `restore`.
         #[arg(long)]
         save_current: bool,
     },
-    /// Delete a snapshot (or all snapshots of a strain with --strain and --all)
+    /// Delete a snapshot, or every snapshot of a strain.
+    ///
+    /// Targets:
+    ///   `strain@ID`   — single snapshot, fully qualified
+    ///   `ID`          — single snapshot, auto-resolved across strains
+    ///   `strain@`     — every snapshot in that strain (bulk)
+    ///   `strain@all`  — alias for `strain@`
     Delete {
-        /// Snapshot ID (format: YYYYMMDD-HHMMSS-NNN, or legacy YYYYMMDD-HHMMSS)
-        snapshot_id: Option<String>,
-        /// Strain (required if snapshot ID exists in multiple strains, or with --all)
-        #[arg(short, long)]
-        strain: Option<String>,
-        /// Delete all snapshots of the given strain
-        #[arg(short, long, requires = "strain")]
-        all: bool,
+        /// `strain@ID` / `ID` for single-snapshot delete, or
+        /// `strain@` / `strain@all` for bulk delete of a strain.
+        target: String,
     },
     /// Apply retention policy and remove old snapshots
     Cleanup {

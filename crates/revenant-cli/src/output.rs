@@ -15,7 +15,7 @@ use revenant_core::check::{Finding, Severity};
 use revenant_core::cleanup::{CleanupSummary, PlanAction, RetentionPlan};
 use revenant_core::config::RetainConfig;
 use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
-use revenant_core::snapshot::{LiveParentRef, SnapshotId};
+use revenant_core::snapshot::{LiveParentRef, SnapshotId, qualified};
 use revenant_core::{Config, SnapshotInfo};
 
 use crate::cli::OutputMode;
@@ -404,7 +404,7 @@ pub fn print_snapshot_created(mode: OutputMode, info: &SnapshotInfo, retention_r
         return;
     }
 
-    println!("Snapshot created: {} (strain: {})", info.id, info.strain);
+    println!("Snapshot created: {}", qualified(&info.strain, &info.id));
     if let Some(meta) = info.metadata.as_ref() {
         println!("  {}", metadata_summary(meta));
     }
@@ -435,17 +435,17 @@ pub fn print_delete_result(mode: OutputMode, strain: &str, deleted: &[String], s
     if single {
         // Single-snapshot delete: one id expected.
         if let Some(id) = deleted.first() {
-            println!("Snapshot {id} deleted.");
+            println!("Snapshot {strain}@{id} deleted.");
         }
         return;
     }
 
-    // --all path.
+    // Bulk path (`strain@` / `strain@all`).
     if deleted.is_empty() {
         println!("No snapshots found for strain '{strain}'.");
     } else {
         for id in deleted {
-            println!("Deleted: {id}");
+            println!("Deleted: {strain}@{id}");
         }
         println!(
             "Deleted {} snapshot(s) from strain '{strain}'.",
@@ -510,7 +510,7 @@ pub fn print_restore_refusal(
 
     eprintln!("Restore is destructive and requires explicit confirmation.");
     eprintln!();
-    eprintln!("Target snapshot: {} (strain: {})", snap.id, snap.strain);
+    eprintln!("Target snapshot: {}", qualified(&snap.strain, &snap.id));
     eprintln!("The following live subvolumes would be replaced:");
     for subvol in subvolumes {
         eprintln!(
@@ -563,7 +563,7 @@ pub fn print_restore_success(
     }
 
     if let Some(p) = pre_restore {
-        println!("Pre-restore snapshot: {} (strain: {})", p.id, p.strain);
+        println!("Pre-restore snapshot: {}", qualified(&p.strain, &p.id));
     }
     println!("Restore complete. Please reboot to apply changes.");
 }

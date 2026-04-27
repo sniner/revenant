@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use revenant_core::backend::btrfs::BtrfsBackend;
 use revenant_core::check::{self, Finding, Severity};
 use revenant_core::preflight;
-use revenant_core::snapshot::{self, SnapshotId};
+use revenant_core::snapshot::{self, SnapshotTarget};
 use revenant_core::{Config, FileSystemBackend};
 
 use revenant_core::pkgmgr::{self, PackageManager};
@@ -156,12 +156,11 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             trigger,
             trigger_unit,
         ),
-        cli::Command::List { strain } => {
-            cmd_list(mode, &config, &backend, &toplevel, strain.as_deref())
+        cli::Command::List { target } => {
+            cmd_list(mode, &config, &backend, &toplevel, target.as_deref())
         }
         cli::Command::Restore {
-            snapshot_id,
-            strain,
+            target,
             yes,
             force,
             save_current,
@@ -170,25 +169,12 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             &config,
             &backend,
             &toplevel,
-            &snapshot_id,
-            strain.as_deref(),
+            &target,
             yes,
             force,
             save_current,
         ),
-        cli::Command::Delete {
-            snapshot_id,
-            strain,
-            all,
-        } => cmd_delete(
-            mode,
-            &config,
-            &backend,
-            &toplevel,
-            snapshot_id.as_deref(),
-            strain.as_deref(),
-            all,
-        ),
+        cli::Command::Delete { target } => cmd_delete(mode, &config, &backend, &toplevel, &target),
         cli::Command::Cleanup { dry_run } => {
             cmd_cleanup(mode, &config, &backend, &toplevel, dry_run)
         }
@@ -392,16 +378,34 @@ fn cmd_list(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-    strain_filter: Option<&str>,
+    target: Option<&str>,
 ) -> Result<()> {
     let snapshots = snapshot::discover_snapshots(config, backend, toplevel)
         .context("failed to discover snapshots")?;
-    let filtered: Vec<_> = match strain_filter {
-        Some(strain) => snapshots
+
+    // Filter rules:
+    //   None                                 → every snapshot
+    //   AllInStrain { strain }               → every snapshot in strain
+    //   Single { strain: Some, id }          → exactly that one row
+    //   Single { strain: None, id }          → every row matching id
+    //                                          (across strains; rare,
+    //                                          surfaces ambiguous IDs)
+    let filtered: Vec<_> = match target.map(str::parse::<SnapshotTarget>).transpose()? {
+        None => snapshots,
+        Some(SnapshotTarget::AllInStrain { strain }) => snapshots
             .into_iter()
             .filter(|s| s.strain == strain)
             .collect(),
-        None => snapshots,
+        Some(SnapshotTarget::Single {
+            strain: Some(st),
+            id,
+        }) => snapshots
+            .into_iter()
+            .filter(|s| s.strain == st && s.id == id)
+            .collect(),
+        Some(SnapshotTarget::Single { strain: None, id }) => {
+            snapshots.into_iter().filter(|s| s.id == id).collect()
+        }
     };
     let live_parent = snapshot::resolve_live_parent(config, backend, toplevel);
     output::print_snapshot_list(mode, &filtered, live_parent.as_ref());
@@ -414,17 +418,25 @@ fn cmd_restore(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-    id_str: &str,
-    strain: Option<&str>,
+    target_str: &str,
     yes: bool,
     force: bool,
     save_current: bool,
 ) -> Result<()> {
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    let id: SnapshotId = id_str.parse().context("invalid snapshot ID format")?;
+    // Restore acts on exactly one snapshot. Bulk targets (`strain@`,
+    // `strain@all`) have no meaningful semantics here — we reject them
+    // up front rather than picking a "first" or restoring N times.
+    let target: SnapshotTarget = target_str.parse().context("invalid restore target")?;
+    let (strain, id) = match target {
+        SnapshotTarget::Single { strain, id } => (strain, id),
+        SnapshotTarget::AllInStrain { .. } => {
+            bail!("restore needs a single snapshot — `strain@` / `strain@all` is not allowed here");
+        }
+    };
 
-    let snap = snapshot::find_snapshot(config, backend, toplevel, &id, strain)
+    let snap = snapshot::find_snapshot(config, backend, toplevel, &id, strain.as_deref())
         .context("failed to find snapshot")?;
 
     // Pre-flight gates run before the dry-run / refusal branch so a user
@@ -505,31 +517,28 @@ fn cmd_delete(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-    id_str: Option<&str>,
-    strain: Option<&str>,
-    all: bool,
+    target_str: &str,
 ) -> Result<()> {
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    if all {
-        let strain_name = strain.ok_or_else(|| anyhow::anyhow!("--all requires --strain"))?;
-        let removed = snapshot::delete_all_strain(config, backend, toplevel, strain_name)
-            .context("failed to delete strain snapshots")?;
-        output::print_delete_result(mode, strain_name, &removed, false);
-    } else {
-        let id_str = id_str.ok_or_else(|| {
-            anyhow::anyhow!("snapshot ID is required (or use --strain with --all)")
-        })?;
-        let id: SnapshotId = id_str.parse().context("invalid snapshot ID format")?;
+    let target: SnapshotTarget = target_str.parse().context("invalid delete target")?;
 
-        let snap = snapshot::find_snapshot(config, backend, toplevel, &id, strain)
-            .context("failed to find snapshot")?;
-        let snap_strain = snap.strain.clone();
+    match target {
+        SnapshotTarget::AllInStrain { strain } => {
+            let removed = snapshot::delete_all_strain(config, backend, toplevel, &strain)
+                .context("failed to delete strain snapshots")?;
+            output::print_delete_result(mode, &strain, &removed, false);
+        }
+        SnapshotTarget::Single { strain: scope, id } => {
+            let snap = snapshot::find_snapshot(config, backend, toplevel, &id, scope.as_deref())
+                .context("failed to find snapshot")?;
+            let snap_strain = snap.strain.clone();
 
-        snapshot::delete_snapshot(config, backend, toplevel, &snap)
-            .context("failed to delete snapshot")?;
+            snapshot::delete_snapshot(config, backend, toplevel, &snap)
+                .context("failed to delete snapshot")?;
 
-        output::print_delete_result(mode, &snap_strain, &[id.to_string()], true);
+            output::print_delete_result(mode, &snap_strain, &[id.to_string()], true);
+        }
     }
 
     Ok(())

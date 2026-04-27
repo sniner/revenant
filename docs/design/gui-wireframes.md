@@ -47,7 +47,7 @@ Three-pane layout via nested `AdwOverlaySplitView`:
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ ☰  Revenant                                                    [⟳]  [⋮]    │  ← AdwHeaderBar
 ├────────────┬───────────────────────────────────────┬───────────────────────┤
-│ Strains    │  default          [Edit retention…]   │  manual               │
+│ Strains    │  default                    [✎]  [+] │  manual               │
 │            │  ────────────────────────────────────  │  2026-04-13 14:22     │
 │ ● default  │                                       │                       │
 │   boot     │  2026-04-15 06:00  periodic           │  "kernel update"      │
@@ -56,16 +56,37 @@ Three-pane layout via nested `AdwOverlaySplitView`:
 │            │  2026-04-13 14:22  manual    ★ anchor │  Strain     default   │
 │ ────────── │   "kernel update"                     │  Created    14:22:08  │
 │ Live state │  2026-04-13 06:00  periodic           │  Subvols    @, @home  │
-│ ★ default  │  2026-04-12 19:00  periodic           │  Size       412 MiB   │
-│   on 2026- │  2026-04-12 18:03  pre-restore        │                       │
-│   04-13    │   "auto: pre-restore save"            │  [Protected]          │
-│   14:22:08 │  2026-04-11 22:14  manual             │                       │
-│            │   "before BIOS update"                │  ┌─────────────────┐  │
-│            │  …                                    │  │  Restore…       │  │
-│            │                                       │  └─────────────────┘  │
+│ ★ default  │  2026-04-12 19:00  periodic           │                       │
+│   on 2026- │  2026-04-12 18:03  pre-restore        │  [Protected]          │
+│   04-13    │   "auto: pre-restore save"            │                       │
+│   14:22:08 │  2026-04-11 22:14  manual             │  ┌─────────────────┐  │
+│            │   "before BIOS update"                │  │  Restore…       │  │
+│            │  …                                    │  └─────────────────┘  │
 │            │                                       │  [Delete]  (Phase 2)  │
 └────────────┴───────────────────────────────────────┴───────────────────────┘
 ```
+
+The `[✎] [+]` group on the right of the strain header carries the
+two strain-scoped actions:
+
+- **`+` — Create snapshot.** Opens an `AdwAlertDialog` with a
+  single optional message field; strain is implicit (the one in
+  the header) and trigger is implicitly `manual` (the daemon
+  hardcodes that for `CreateSnapshot` — the other triggers
+  exist to record *who* fired the snapshot, and "a person clicked
+  the button" is `manual` by definition). Polkit prompt fires on
+  the resulting D-Bus call. `list-add-symbolic`, tooltip "Create
+  snapshot".
+- **`✎` — Edit retention.** Opens the retention dialog (see below).
+  `document-edit-symbolic`, tooltip "Edit retention".
+
+Both stay visible across loading/empty/error states of the snapshot
+list — `+` matters most when the list is empty, exactly the moment
+where it should be most obvious.
+
+Header-bar `⋮` (kebab) drops "Take snapshot…" — superseded by the
+in-pane `+` — and keeps "About / Preferences / Open config file /
+Quit".
 
 Sidebar: `AdwNavigationSplitView` with the strain list. A pinned
 "Live state" footer block shows what the running system descends from
@@ -90,12 +111,19 @@ windows, slidable on narrow ones. Renders the selected snapshot:
 - Big timestamp + strain.
 - Message (italic; "—" if missing).
 - Key/value rows: trigger, subvolumes, created (full timestamp + UTC
-  offset), size (from `Snapshot.size_bytes`; "—" if `0`).
+  offset).
 - Pills: `Protected` if retention claims it; `★ Anchor` if it's the live
   parent.
 - Primary action: **Restore…** (suggested-action style).
 - Secondary actions: **Delete** (greyed in Phase 1), context menu with
   "Copy id", "Show in file manager" (jumps to the sidecar dir).
+
+Disk-usage size is *not* shown. btrfs does not expose per-snapshot
+usage without quota groups (`qgroup`), and qgroups are expensive to
+maintain on rotational disks — we'd be running them just for a UI
+field. If users ask later, we can add an explicit "Compute size…"
+action that runs `btrfs filesystem du` / qgroup queries on demand
+and surfaces the result with a "rough estimate" caveat.
 
 When nothing is selected: `AdwStatusPage` placeholder ("Select a snapshot
 to see details").
@@ -120,9 +148,9 @@ to see details").
   Quit.
 - Refresh button (`⟳`): manual reload; in practice rarely needed because
   of inotify-driven `LineageChanged`/`SnapshotsChanged` signals.
-- Kebab (`⋮`): "Take snapshot…" (Phase 2), "Open config file…" (jumps to
-  `/etc/revenant/config.toml` — for now the safety net for anything the
-  GUI can't do).
+- Kebab (`⋮`): "Open config file…" (jumps to `/etc/revenant/config.toml`
+  — for now the safety net for anything the GUI can't do). Snapshot
+  creation lives on the strain header, not here.
 
 ## Edit retention dialog
 
@@ -224,8 +252,10 @@ Each via `AdwStatusPage`:
 - **No daemon connection** — "Cannot reach `revenant-daemon`. Is the
   service running?" with a "Try again" button. (zbus reconnects in the
   background; this state means initial connection failed.)
-- **No snapshots** — "No snapshots in this strain yet." with a
-  "Take a snapshot" button (greyed in Phase 1).
+- **No snapshots** — "No snapshots in this strain yet. Use the
+  `+` in the strain header to create one." The strain-header `+`
+  is always visible, so we don't repeat the button inside the
+  status page.
 - **Toplevel not mounted** — daemon reports
   `BackendUnavailable`. "Snapshot storage is not available — check the
   configuration." with a link to the config file.
@@ -246,7 +276,6 @@ periodic snapshot lands and the list re-sorts).
 
 ## Out of scope (Phase 1)
 
-- Taking snapshots from the GUI (button is shown but disabled).
 - Deleting snapshots from the GUI.
 - Editing snapshot messages.
 - Adding/removing strains.
@@ -255,6 +284,8 @@ periodic snapshot lands and the list re-sorts).
   feature).
 - Undo of a restore in the GUI (the user reboots into the saved-current
   snapshot manually for now).
+- Per-snapshot disk usage in the detail pane — see the rationale next
+  to the detail-pane spec.
 
 ## Open questions
 

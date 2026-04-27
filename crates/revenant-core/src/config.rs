@@ -406,6 +406,16 @@ backend = "systemd-boot"
     }
 
     #[test]
+    fn reject_at_sign_in_strain_name() {
+        // `@` is the separator in the CLI's strain@ID notation
+        // (SnapshotTarget); admitting it into strain names would make
+        // that grammar ambiguous. The whitelist already rejects it,
+        // this test pins the behaviour.
+        let toml = EXAMPLE_CONFIG.replace("[strain.default]", "[strain.\"strain@x\"]");
+        assert!(&toml.parse::<Config>().is_err());
+    }
+
+    #[test]
     fn reject_reserved_delete_strain_name() {
         let toml = EXAMPLE_CONFIG.replace("[strain.default]", "[strain.DELETE]");
         assert!(&toml.parse::<Config>().is_err());

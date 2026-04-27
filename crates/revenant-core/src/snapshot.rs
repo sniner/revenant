@@ -170,6 +170,114 @@ impl FromStr for SnapshotId {
     }
 }
 
+/// A user-supplied snapshot reference for `restore`/`delete`/`list`.
+///
+/// The textual form is the canonical addressing notation across the CLI:
+///
+/// * `strain@ID` — fully qualified single snapshot
+/// * `ID` — single snapshot, strain auto-resolved by lookup
+/// * `strain@` — every snapshot in a strain (bulk)
+/// * `strain@all` — alias for `strain@`, kept because an empty ID slot
+///   looks like a missing argument in scripts
+///
+/// Strain names are restricted to `[a-zA-Z0-9_]` (see
+/// [`crate::config`]'s validation), so `@` is unambiguous as the
+/// separator and we split on the *first* one we see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotTarget {
+    /// One specific snapshot. `strain` is `Some` when the user spelled
+    /// it out, `None` for a bare ID — the resolver looks it up across
+    /// strains and errors if it is ambiguous.
+    Single {
+        strain: Option<String>,
+        id: SnapshotId,
+    },
+    /// Every snapshot of a given strain.
+    AllInStrain { strain: String },
+}
+
+impl SnapshotTarget {
+    /// `true` for the bulk variant (`strain@` / `strain@all`).
+    #[must_use]
+    pub fn is_bulk(&self) -> bool {
+        matches!(self, Self::AllInStrain { .. })
+    }
+}
+
+impl fmt::Display for SnapshotTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Single {
+                strain: Some(s),
+                id,
+            } => write!(f, "{s}@{id}"),
+            Self::Single { strain: None, id } => write!(f, "{id}"),
+            Self::AllInStrain { strain } => write!(f, "{strain}@"),
+        }
+    }
+}
+
+impl FromStr for SnapshotTarget {
+    type Err = RevenantError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(RevenantError::Other(
+                "empty snapshot target — expected ID, strain@ID, or strain@".to_string(),
+            ));
+        }
+        match s.split_once('@') {
+            Some((strain, rest)) => {
+                if strain.is_empty() {
+                    return Err(RevenantError::Other(format!(
+                        "missing strain before '@' in {s:?}"
+                    )));
+                }
+                if !is_valid_strain_token(strain) {
+                    return Err(RevenantError::Other(format!(
+                        "invalid strain name {strain:?} in target — only [a-zA-Z0-9_] allowed"
+                    )));
+                }
+                if rest.is_empty() || rest == "all" {
+                    Ok(Self::AllInStrain {
+                        strain: strain.to_string(),
+                    })
+                } else {
+                    let id = SnapshotId::from_string(rest).map_err(|e| {
+                        RevenantError::Other(format!("invalid snapshot ID in {s:?}: {e}"))
+                    })?;
+                    Ok(Self::Single {
+                        strain: Some(strain.to_string()),
+                        id,
+                    })
+                }
+            }
+            None => {
+                let id = SnapshotId::from_string(s).map_err(|_| {
+                    RevenantError::Other(format!("expected ID, strain@ID, or strain@ — got {s:?}"))
+                })?;
+                Ok(Self::Single { strain: None, id })
+            }
+        }
+    }
+}
+
+/// Local mirror of the strain-name predicate used by `Config::validate`.
+/// Duplicated here to avoid a `config` ↔ `snapshot` import dependency for
+/// what is a one-line predicate; the canonical rule lives in `config.rs`.
+fn is_valid_strain_token(s: &str) -> bool {
+    !s.is_empty()
+        && s != crate::config::DELETE_STRAIN
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Render `(strain, id)` as the canonical `strain@id` token used in
+/// human-facing output (replaces the older `(strain: …)` parenthetical).
+#[must_use]
+pub fn qualified(strain: &str, id: &SnapshotId) -> String {
+    format!("{strain}@{id}")
+}
+
 /// A discovered snapshot, derived from scanning actual subvolumes on disk.
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotInfo {
@@ -399,10 +507,13 @@ pub fn find_snapshot(
         0 => Err(RevenantError::SnapshotNotFound(id.to_string())),
         1 => Ok(matches.remove(0)),
         _ => {
-            let strains: Vec<_> = matches.iter().map(|s| s.strain.as_str()).collect();
+            let qualified: Vec<_> = matches
+                .iter()
+                .map(|s| qualified(&s.strain, &s.id))
+                .collect();
             Err(RevenantError::Other(format!(
-                "snapshot {id} exists in multiple strains: {}. Use --strain to disambiguate.",
-                strains.join(", ")
+                "snapshot {id} exists in multiple strains — qualify it: {}",
+                qualified.join(", ")
             )))
         }
     }
@@ -1267,6 +1378,118 @@ subvolumes = [{subvol_list}]
         // Too short / too long
         assert!(SnapshotId::from_string("20260316-14302").is_err());
         assert!(SnapshotId::from_string("20260316-143022-4567").is_err());
+    }
+
+    #[test]
+    fn target_parses_strain_and_id() {
+        let t: SnapshotTarget = "default@20260316-143022-456".parse().unwrap();
+        let SnapshotTarget::Single { strain, id } = t else {
+            panic!("expected Single");
+        };
+        assert_eq!(strain.as_deref(), Some("default"));
+        assert_eq!(id.as_str(), "20260316-143022-456");
+    }
+
+    #[test]
+    fn target_parses_bare_id_unscoped() {
+        let t: SnapshotTarget = "20260316-143022-456".parse().unwrap();
+        match t {
+            SnapshotTarget::Single { strain: None, .. } => {}
+            other => panic!("expected unscoped Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn target_parses_bulk_trailing_at() {
+        let t: SnapshotTarget = "default@".parse().unwrap();
+        assert_eq!(
+            t,
+            SnapshotTarget::AllInStrain {
+                strain: "default".to_string(),
+            }
+        );
+        assert!(t.is_bulk());
+    }
+
+    #[test]
+    fn target_parses_bulk_all_alias() {
+        // `strain@all` is accepted as a synonym for `strain@` so users
+        // who dislike the empty-suffix form (or scripts where a missing
+        // value would look like a bug) have a literal keyword.
+        let t: SnapshotTarget = "default@all".parse().unwrap();
+        assert_eq!(
+            t,
+            SnapshotTarget::AllInStrain {
+                strain: "default".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn target_rejects_empty_strain() {
+        let err = "@20260316-143022-456"
+            .parse::<SnapshotTarget>()
+            .unwrap_err();
+        assert!(format!("{err}").contains("missing strain"));
+    }
+
+    #[test]
+    fn target_rejects_invalid_strain_chars() {
+        // `@` itself can't appear (split_once consumes the first one),
+        // but other illegal chars in the strain slot must be caught.
+        let err = "bad-name@20260316-143022-456"
+            .parse::<SnapshotTarget>()
+            .unwrap_err();
+        assert!(format!("{err}").contains("invalid strain"), "got: {err}");
+    }
+
+    #[test]
+    fn target_rejects_bare_non_id() {
+        let err = "not-an-id".parse::<SnapshotTarget>().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected ID, strain@ID, or strain@"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn target_rejects_invalid_id_in_qualified_form() {
+        let err = "default@bogus".parse::<SnapshotTarget>().unwrap_err();
+        assert!(format!("{err}").contains("invalid snapshot ID"));
+    }
+
+    #[test]
+    fn target_display_round_trips() {
+        let cases = [
+            "default@20260316-143022-456",
+            "20260316-143022-456",
+            "default@",
+        ];
+        for s in cases {
+            let t: SnapshotTarget = s.parse().unwrap();
+            assert_eq!(format!("{t}"), s, "round-trip failed for {s:?}");
+        }
+        // `strain@all` Display normalises back to `strain@` — both
+        // parse to the same variant, so the bulk form has one
+        // canonical rendering.
+        let t: SnapshotTarget = "default@all".parse().unwrap();
+        assert_eq!(format!("{t}"), "default@");
+    }
+
+    #[test]
+    fn qualified_helper_matches_target_display() {
+        let id = SnapshotId::from_string("20260316-143022-456").unwrap();
+        let s = qualified("default", &id);
+        assert_eq!(s, "default@20260316-143022-456");
+        let parsed: SnapshotTarget = s.parse().unwrap();
+        assert!(matches!(
+            parsed,
+            SnapshotTarget::Single {
+                strain: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

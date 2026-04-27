@@ -20,6 +20,12 @@ ExecStart=/usr/bin/revenantd
 # The daemon mounts the btrfs toplevel under /run/revenant/; keep that
 # mount in our own private namespace so it does not leak into the host.
 PrivateMounts=true
+# /run/revenant must be writable for the daemon's mountpoint dir under
+# ProtectSystem=strict (which mounts /run read-only otherwise).
+# RuntimeDirectory= creates it owned by the service and cleans it up at
+# stop. 0700 matches the mode the daemon itself enforces on the dir.
+RuntimeDirectory=revenant
+RuntimeDirectoryMode=0700
 # Hardening (loose first; tighten as the implementation matures).
 ProtectSystem=strict
 ProtectHome=read-only

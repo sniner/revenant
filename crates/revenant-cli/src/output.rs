@@ -664,8 +664,10 @@ pub enum InitTask {
     /// Config file was written.
     WroteConfig {
         path: String,
-        /// `true` when the file did not exist before, `false` when it
-        /// was overwritten (`--force`) or had strains added to it.
+        /// `true` when the file did not exist before, `false` when an
+        /// existing file had strains merged into it (idempotent
+        /// update). The config is never overwritten from scratch by
+        /// `init`; remove the file to force regeneration.
         created: bool,
     },
     /// Systemd strains inserted into an existing config that was

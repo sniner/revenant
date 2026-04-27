@@ -145,7 +145,11 @@ pub enum Command {
         /// Output path for the generated configuration file
         #[arg(short, long, default_value = "/etc/revenant/config.toml")]
         output: String,
-        /// Overwrite existing configuration file
+        /// Overwrite generated systemd unit / pacman hook files when
+        /// their on-disk content differs. Does NOT overwrite an
+        /// existing config.toml — site-local edits are always kept.
+        /// To regenerate the config from system detection, remove
+        /// /etc/revenant/config.toml first and re-run `init`.
         #[arg(long)]
         force: bool,
         /// Generate systemd service and timer unit files

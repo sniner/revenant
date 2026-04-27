@@ -148,7 +148,9 @@ pub fn check_config_file(path: &Path) -> Vec<Finding> {
                 "config-invalid",
                 format!("failed to load {}: {e}", path.display()),
             )
-            .with_hint("fix the configuration or regenerate it with `revenantctl init --force`"),
+            .with_hint(
+                "fix the configuration, or remove the file and re-run `revenantctl init` to regenerate it from system detection",
+            ),
         ],
     }
 }

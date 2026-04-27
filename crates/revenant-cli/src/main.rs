@@ -653,16 +653,21 @@ fn cmd_init(mode: OutputMode, args: InitArgs) -> Result<()> {
     let config_path = Path::new(&output_path);
     let config_exists = config_path.exists();
 
-    // Three modes:
-    //   1. Fresh / --force           → detect system, build config from
-    //                                  scratch, add systemd / pacman strains
-    //                                  if asked.
-    //   2. Existing + integration    → load config, add any missing strains
-    //                                  required by --systemd or --pacman,
-    //                                  write back. User customisations on
-    //                                  other strains are preserved.
-    //   3. Existing + plain `init`   → bail (would clobber).
-    if !config_exists || force {
+    // Config is treated as user-owned: we create it on first init from
+    // system detection, but never rewrite an existing one from scratch.
+    // `--force` only opts into overwriting the *generated* unit / hook
+    // files (whose content is derived deterministically from config +
+    // bin path) and is consulted by `write_systemd_units` /
+    // `write_pkgmgr_hooks` further down. To regenerate the config, the
+    // operator removes /etc/revenant/config.toml and re-runs `init`.
+    //
+    // Three paths from here:
+    //   1. Fresh                     → detect, build, add strains, write.
+    //   2. Existing + integration    → load, idempotently ensure the
+    //                                  built-in strains exist, write
+    //                                  back only if anything changed.
+    //   3. Existing + plain `init`   → nothing to do, bail with hint.
+    if !config_exists {
         let detected = revenant_core::init::detect_all().context("system detection failed")?;
 
         reporter.task(InitTask::DetectedSystem {
@@ -695,7 +700,7 @@ fn cmd_init(mode: OutputMode, args: InitArgs) -> Result<()> {
         write_config_to(&config, config_path, &output_path)?;
         reporter.task(InitTask::WroteConfig {
             path: output_path.clone(),
-            created: !config_exists,
+            created: true,
         });
     } else if systemd || pacman {
         let mut config = revenant_core::Config::load(config_path)
@@ -725,7 +730,12 @@ fn cmd_init(mode: OutputMode, args: InitArgs) -> Result<()> {
             });
         }
     } else {
-        bail!("configuration file already exists: {output_path}\nUse --force to overwrite.");
+        bail!(
+            "configuration file already exists: {output_path}\n\
+             To regenerate from system detection, remove the file and re-run `init`.\n\
+             To (re)write systemd units or pacman hooks, pass `--systemd` and/or `--pacman` \
+             (use `--force` to overwrite their on-disk content)."
+        );
     }
 
     // Resolve the revenantctl binary path once — both writers need it.

@@ -30,6 +30,9 @@ pub struct Snapshot {
     pub trigger: String,
     pub message: Option<String>,
     pub is_live_anchor: bool,
+    /// True when retention currently keeps this snapshot. Drives the
+    /// `Protected` pill in the detail pane.
+    pub is_protected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,7 @@ impl Snapshot {
             trigger: read_str(d, "trigger").unwrap_or("unknown").to_string(),
             message: read_str(d, "message").map(str::to_owned),
             is_live_anchor: read_bool(d, "is_live_anchor").unwrap_or(false),
+            is_protected: read_bool(d, "is_protected").unwrap_or(false),
         })
     }
 }

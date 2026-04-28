@@ -100,6 +100,15 @@ pub enum Event {
         strain: String,
         result: Result<Snapshot, String>,
     },
+    /// Result of a privileged `DeleteSnapshot` call. The strain/id
+    /// pair is echoed so the toast handler can name the deleted
+    /// snapshot without holding extra state. The list refreshes via
+    /// `SnapshotsChanged` on success.
+    DeleteSnapshotResult {
+        strain: String,
+        id: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Commands sent from the GUI to the worker.
@@ -133,6 +142,9 @@ pub enum Command {
         strain: String,
         message: Vec<String>,
     },
+    /// Issue a privileged `DeleteSnapshot` call. Worker replies with
+    /// `Event::DeleteSnapshotResult`.
+    DeleteSnapshot { strain: String, id: String },
 }
 
 /// Worker handle returned to the GUI thread.
@@ -343,6 +355,16 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
             let result = create_snapshot(client, &strain, message).await;
             let _ = evt_tx
                 .send(Event::CreateSnapshotResult { strain, result })
+                .await;
+        }
+        Command::DeleteSnapshot { strain, id } => {
+            let result = client
+                .proxy()
+                .delete_snapshot(&strain, &id)
+                .await
+                .map_err(|e| format!("{e}"));
+            let _ = evt_tx
+                .send(Event::DeleteSnapshotResult { strain, id, result })
                 .await;
         }
     }

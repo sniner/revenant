@@ -51,6 +51,14 @@ struct AppState {
     /// Toast displayed while a CreateSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
     create_progress_toast: Option<adw::Toast>,
+    /// True between sending `Command::DeleteSnapshot` and receiving
+    /// `Event::DeleteSnapshotResult`. Per-row Delete buttons read
+    /// this and no-op while it's set so a second polkit prompt can't
+    /// queue behind the first.
+    delete_in_flight: bool,
+    /// Toast displayed while a DeleteSnapshot is being processed.
+    /// Same dismissal pattern as `restore_progress_toast`.
+    delete_progress_toast: Option<adw::Toast>,
     /// Strain to pre-select on the very first `Strains` event, sourced
     /// from the daemon's `GetLatestStrain` reply. Consumed (taken) the
     /// first time `apply_strains` runs without an existing user
@@ -508,6 +516,9 @@ fn apply_event(
         Event::CreateSnapshotResult { strain, result } => {
             apply_create_snapshot_result(widgets, state, &strain, result);
         }
+        Event::DeleteSnapshotResult { strain, id, result } => {
+            apply_delete_snapshot_result(widgets, state, &strain, &id, result);
+        }
     }
 }
 
@@ -817,9 +828,11 @@ fn apply_snapshots(
 /// the right, then an aligned key/value block (Description, Trigger).
 /// Empty values are skipped so the row stays compact.
 ///
-/// The Restore button is wired here so it can capture the snapshot
-/// directly; the Delete button is shown but disabled until the
-/// daemon-side delete flow is wired up.
+/// Both action buttons capture the snapshot directly so each row's
+/// click handler refers to the right snapshot. The Delete dialog
+/// warns extra-strongly when the row is the live anchor — the daemon
+/// allows it (matching CLI semantics), but the user loses the ★
+/// reference and that's worth flagging.
 fn snapshot_row(
     snap: &Snapshot,
     parent: &adw::ApplicationWindow,
@@ -853,9 +866,14 @@ fn snapshot_row(
     let delete_btn = gtk::Button::builder()
         .label("Delete")
         .css_classes(["pill", "destructive-action"])
-        .sensitive(false)
-        .tooltip_text("Phase 2 — not yet implemented")
         .build();
+    if snap.is_live_anchor {
+        delete_btn.set_tooltip_text(Some(
+            "This snapshot is the parent of the running system. \
+             Deleting it removes the ★ live-anchor reference; the \
+             running system itself is unaffected.",
+        ));
+    }
 
     let headline = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -914,6 +932,20 @@ fn snapshot_row(
                 return;
             }
             present_restore_dialog(&parent, &widgets, &state, &cmd_tx, &snap);
+        });
+    }
+
+    {
+        let snap = snap.clone();
+        let widgets = widgets.clone();
+        let state = Rc::clone(state);
+        let cmd_tx = cmd_tx.clone();
+        let parent = parent.clone();
+        delete_btn.connect_clicked(move |_| {
+            if state.borrow().delete_in_flight {
+                return;
+            }
+            present_delete_dialog(&parent, &widgets, &state, &cmd_tx, &snap);
         });
     }
 
@@ -1246,6 +1278,104 @@ fn apply_create_snapshot_result(
             widgets
                 .toast_overlay
                 .add_toast(adw::Toast::new(&format!("Create failed: {reason}")));
+        }
+    }
+}
+
+/// Present the delete-snapshot confirmation. Single-snapshot delete:
+/// strain + id are captured from the row's snapshot. Live-anchor rows
+/// get an extra warning paragraph so the user knows what they're
+/// trading away (the ★ reference, not the running system).
+fn present_delete_dialog(
+    parent: &adw::ApplicationWindow,
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    cmd_tx: &async_channel::Sender<Command>,
+    snap: &Snapshot,
+) {
+    let mut body = format!(
+        "{} · {}\n\n\
+         {}\n\n\
+         The snapshot's subvolumes and metadata sidecar will be \
+         removed. This cannot be undone.",
+        snap.strain,
+        format_created(snap),
+        format_message_items(&snap.message).unwrap_or_else(|| "(no message)".to_string()),
+    );
+    if snap.is_live_anchor {
+        body.push_str(
+            "\n\nThis is the ★ live anchor — the snapshot the running \
+             system descends from. Deleting it does not affect the \
+             running system, but you will lose the reference point \
+             that ties the live state to a named snapshot.",
+        );
+    }
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("Delete snapshot?")
+        .body(body)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("delete", "Delete");
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let snap_strain = snap.strain.clone();
+    let snap_id = snap.id.clone();
+    let widgets = widgets.clone();
+    let state = Rc::clone(state);
+    let cmd_tx = cmd_tx.clone();
+    dialog.connect_response(None, move |_dlg, response| {
+        if response != "delete" {
+            return;
+        }
+
+        state.borrow_mut().delete_in_flight = true;
+
+        let toast = adw::Toast::builder()
+            .title("Deleting snapshot — waiting for authentication…")
+            .timeout(0)
+            .build();
+        widgets.toast_overlay.add_toast(toast.clone());
+        state.borrow_mut().delete_progress_toast = Some(toast);
+
+        let _ = cmd_tx.send_blocking(Command::DeleteSnapshot {
+            strain: snap_strain.clone(),
+            id: snap_id.clone(),
+        });
+    });
+
+    dialog.present(Some(parent));
+}
+
+fn apply_delete_snapshot_result(
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    strain: &str,
+    id: &str,
+    result: Result<(), String>,
+) {
+    {
+        let mut st = state.borrow_mut();
+        st.delete_in_flight = false;
+        if let Some(toast) = st.delete_progress_toast.take() {
+            toast.dismiss();
+        }
+    }
+
+    match result {
+        Ok(()) => {
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("Deleted {strain}@{id}")));
+            // List refresh comes via SnapshotsChanged.
+        }
+        Err(reason) => {
+            tracing::warn!("DeleteSnapshot({strain}@{id}) failed: {reason}");
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("Delete failed: {reason}")));
         }
     }
 }

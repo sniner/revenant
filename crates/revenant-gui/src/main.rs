@@ -881,8 +881,8 @@ fn snapshot_row(
         .spacing(2)
         .margin_start(28) // line up with the date (after the ★ slot)
         .build();
-    if let Some(desc) = snap.description.as_deref().filter(|s| !s.is_empty()) {
-        kv.append(&kv_pair("Description:", desc));
+    if let Some(desc) = snap.description() {
+        kv.append(&kv_pair("Description:", &desc));
     }
     if !snap.trigger.is_empty() && snap.trigger != "unknown" {
         kv.append(&kv_pair("Trigger:", &snap.trigger));

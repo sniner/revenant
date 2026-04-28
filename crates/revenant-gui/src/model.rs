@@ -70,12 +70,15 @@ pub struct Snapshot {
     /// sidecar nor a parseable id. The daemon usually sends one.
     pub created: Option<String>,
     pub trigger: String,
+    /// User- or automation-supplied free-form note. Same field the
+    /// sidecar stores under `message`; `None` when the snapshot
+    /// carries none.
     pub message: Option<String>,
-    /// Human-readable summary line — trigger detail (pacman targets,
-    /// systemd unit, restore target) optionally combined with the
-    /// message. Mirrors the CLI's "Description" column minus the
-    /// leading trigger kind. `None` when there is nothing to show.
-    pub description: Option<String>,
+    /// Trigger-specific payload as a pre-rendered string (pacman
+    /// targets like "linux, mesa", systemd unit, restore target).
+    /// `None` when the trigger has no detail of its own (typical
+    /// manual snapshot).
+    pub trigger_detail: Option<String>,
     pub is_live_anchor: bool,
     /// True when retention currently keeps this snapshot. Drives the
     /// `Protected` pill in the detail pane.
@@ -106,6 +109,21 @@ impl Strain {
 }
 
 impl Snapshot {
+    /// Combined display string for the row's "Description" K/V: the
+    /// trigger detail and the user message joined with an em-dash.
+    /// `None` when neither half has anything to show — the caller
+    /// should omit the row entirely in that case.
+    pub fn description(&self) -> Option<String> {
+        let detail = self.trigger_detail.as_deref().filter(|s| !s.is_empty());
+        let message = self.message.as_deref().filter(|s| !s.is_empty());
+        match (detail, message) {
+            (Some(d), Some(m)) => Some(format!("{d} — {m}")),
+            (Some(d), None) => Some(d.to_string()),
+            (None, Some(m)) => Some(m.to_string()),
+            (None, None) => None,
+        }
+    }
+
     pub fn from_dict(d: &Dict) -> Option<Self> {
         let id = read_str(d, "id")?.to_string();
         let strain = read_str(d, "strain")?.to_string();
@@ -115,7 +133,7 @@ impl Snapshot {
             created: read_str(d, "created").map(str::to_owned),
             trigger: read_str(d, "trigger").unwrap_or("unknown").to_string(),
             message: read_str(d, "message").map(str::to_owned),
-            description: read_str(d, "description").map(str::to_owned),
+            trigger_detail: read_str(d, "trigger_detail").map(str::to_owned),
             is_live_anchor: read_bool(d, "is_live_anchor").unwrap_or(false),
             is_protected: read_bool(d, "is_protected").unwrap_or(false),
         })

@@ -67,8 +67,8 @@ pub fn snapshot_to_dict(
     if let Some(msg) = message {
         insert_str(&mut d, "message", msg)?;
     }
-    if let Some(desc) = snap.metadata.as_ref().and_then(description_text) {
-        insert_str(&mut d, "description", &desc)?;
+    if let Some(detail) = snap.metadata.as_ref().and_then(trigger_detail_text) {
+        insert_str(&mut d, "trigger_detail", &detail)?;
     }
 
     let is_anchor = matches!(
@@ -87,12 +87,13 @@ pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {
     Ok(d)
 }
 
-/// Same content as the CLI's "Description" column (`metadata_summary`)
-/// minus the leading trigger kind — the GUI shows the kind separately
-/// as "Trigger". Returns `None` when there is nothing to say (no
-/// detail and no message), so the wire dict can omit the key.
-fn description_text(meta: &SnapshotMetadata) -> Option<String> {
-    let detail = match meta.trigger.kind {
+/// Trigger-specific detail rendered as a string: pacman targets,
+/// systemd unit, or restore target. `None` when the trigger carries
+/// no payload of its own (e.g. plain manual snapshots). The user's
+/// `message` is *not* mixed in here — it stays on its own wire key
+/// so the client can compose the two however it wants.
+fn trigger_detail_text(meta: &SnapshotMetadata) -> Option<String> {
+    match meta.trigger.kind {
         TriggerKind::Pacman => meta
             .trigger
             .pacman
@@ -111,12 +112,6 @@ fn description_text(meta: &SnapshotMetadata) -> Option<String> {
         }
         TriggerKind::Restore => meta.trigger.restore.as_ref().and_then(|r| r.target.clone()),
         _ => None,
-    };
-    match (detail, meta.message.clone()) {
-        (Some(d), Some(m)) => Some(format!("{d} — {m}")),
-        (Some(d), None) => Some(d),
-        (None, Some(m)) => Some(m),
-        (None, None) => None,
     }
 }
 

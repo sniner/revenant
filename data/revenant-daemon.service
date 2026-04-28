@@ -17,6 +17,9 @@ After=systemd-tmpfiles-setup.service
 Type=dbus
 BusName=org.revenant.Daemon1
 ExecStart=/usr/bin/revenantd
+# Allow sd_notify(STATUS=…) so `systemctl status` reflects the
+# daemon's current state ("ready, version x.y.z" or "degraded: …").
+NotifyAccess=main
 # The daemon mounts the btrfs toplevel under /run/revenant/; keep that
 # mount in our own private namespace so it does not leak into the host.
 PrivateMounts=true

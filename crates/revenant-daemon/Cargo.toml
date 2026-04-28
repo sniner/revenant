@@ -33,5 +33,9 @@ futures-util = "0.3"
 # Daemon-only dependency for round-trip TOML edits of /etc/revenant/config.toml.
 toml_edit = "0.22"
 
+# Daemon-only dependency for sd_notify(READY=1, STATUS=…) so that
+# `systemctl status revenant-daemon` shows a human-readable state line.
+sd-notify = "0.4"
+
 [dev-dependencies]
 tempfile = "3"

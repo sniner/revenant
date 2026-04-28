@@ -14,6 +14,7 @@ mod watcher;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use sd_notify::NotifyState;
 use tracing_subscriber::EnvFilter;
 
 const BUS_NAME: &str = "org.revenant.Daemon1";
@@ -71,6 +72,20 @@ async fn main() -> Result<()> {
 
     tracing::info!("registered {BUS_NAME} on {OBJECT_PATH}");
 
+    // Tell systemd we're up and what state we're in. Outside of
+    // systemd (NOTIFY_SOCKET unset) this is a silent no-op, so it's
+    // safe under `cargo run` too.
+    let status_line = match initial_state_label.0 {
+        "ready" => format!("ready, version {}", env!("CARGO_PKG_VERSION")),
+        _ => format!("degraded: {}", initial_state_label.1),
+    };
+    if let Err(e) = sd_notify::notify(
+        false,
+        &[NotifyState::Ready, NotifyState::Status(&status_line)],
+    ) {
+        tracing::warn!("sd_notify: {e}");
+    }
+
     let object_path =
         zvariant::OwnedObjectPath::try_from(OBJECT_PATH).context("encode object path")?;
 
@@ -108,6 +123,7 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("shutting down");
+    let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
     Ok(())
 }
 

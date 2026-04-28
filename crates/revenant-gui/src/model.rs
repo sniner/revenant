@@ -16,9 +16,20 @@ use crate::proxy::{Dict, StrainTuple};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Strain {
     pub name: String,
+    /// Optional human-readable label from `config.toml`. `None` when
+    /// the wire string is empty.
+    pub display_name: Option<String>,
     pub subvolumes: Vec<String>,
     pub efi: bool,
     pub retention: Retention,
+}
+
+impl Strain {
+    /// Title to render in the sidebar — display_name when set,
+    /// identifier otherwise.
+    pub fn title(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// Tiered retention policy for one strain. All tiers are unsigned
@@ -74,9 +85,14 @@ pub struct LiveParent {
 
 impl Strain {
     pub fn from_tuple(t: StrainTuple) -> Self {
-        let (name, subvolumes, efi, retain) = t;
+        let (name, subvolumes, efi, retain, display_name) = t;
         Self {
             name,
+            display_name: if display_name.is_empty() {
+                None
+            } else {
+                Some(display_name)
+            },
             subvolumes,
             efi,
             retention: Retention::from_dict(&retain),

@@ -127,6 +127,12 @@ impl Default for RetainConfig {
 /// Configuration for a snapshot strain (namespace).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrainConfig {
+    /// Optional human-readable name. The identifier (the map key) is
+    /// constrained to `[a-zA-Z0-9_]` and tends to be terse; this field
+    /// lets the GUI show something friendlier ("Manual Snapshots"
+    /// instead of `manual`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Retention policy for this strain.
     #[serde(default)]
     pub retain: RetainConfig,
@@ -462,5 +468,35 @@ last = 3
     fn strain_lookup_not_found() {
         let config = EXAMPLE_CONFIG.parse::<Config>().unwrap();
         assert!(config.strain("nonexistent").is_err());
+    }
+
+    #[test]
+    fn display_name_optional() {
+        let toml = r#"
+[sys]
+rootfs_subvol = "@"
+
+[sys.rootfs]
+device_uuid = "12345678-1234-1234-1234-123456789abc"
+
+[sys.efi]
+enabled = false
+
+[sys.bootloader]
+backend = "systemd-boot"
+
+[strain.manual]
+display_name = "Manual Snapshots"
+subvolumes = ["@"]
+
+[strain.pacman]
+subvolumes = ["@"]
+"#;
+        let config = toml.parse::<Config>().unwrap();
+        assert_eq!(
+            config.strain("manual").unwrap().display_name.as_deref(),
+            Some("Manual Snapshots")
+        );
+        assert!(config.strain("pacman").unwrap().display_name.is_none());
     }
 }

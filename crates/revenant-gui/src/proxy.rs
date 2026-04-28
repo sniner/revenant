@@ -21,14 +21,11 @@ use zvariant::OwnedValue;
 /// Extensible `a{sv}` dict — used for snapshot/daemon-info/options.
 pub type Dict = HashMap<String, OwnedValue>;
 
-/// Strain wire tuple — `(sasba{sv})`: name, subvolumes, efi, retention.
-///
-/// The proxy macro inlines the concrete tuple in its generated code,
-/// so the alias is technically unused at compile time even though
-/// it appears in this trait's signatures. Slice 4b will reference
-/// it from the strain-list parsing code.
+/// Strain wire tuple — `(sasba{sv}s)`: name, subvolumes, efi,
+/// retention, display_name. `display_name` is `""` when not set in
+/// config; the GUI treats `""` and absent as identical.
 #[allow(dead_code)]
-pub type StrainTuple = (String, Vec<String>, bool, Dict);
+pub type StrainTuple = (String, Vec<String>, bool, Dict, String);
 
 #[proxy(
     interface = "org.revenant.Daemon1",
@@ -47,6 +44,8 @@ pub trait Daemon {
     fn list_strains(&self) -> zbus::Result<Vec<StrainTuple>>;
 
     fn get_strain(&self, name: &str) -> zbus::Result<StrainTuple>;
+
+    fn get_latest_strain(&self) -> zbus::Result<String>;
 
     fn set_strain_retention(&self, name: &str, retention: Dict) -> zbus::Result<()>;
 

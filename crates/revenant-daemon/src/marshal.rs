@@ -14,8 +14,12 @@ use crate::errors::{DaemonError, DaemonResult};
 /// `a{sv}` extensible dict.
 pub type Dict = HashMap<String, OwnedValue>;
 
-/// Strain wire type — `(sasba{sv})`.
-pub type StrainTuple = (String, Vec<String>, bool, Dict);
+/// Strain wire type — `(sasba{sv}s)`.
+///
+/// Tuple positions: name, subvolumes, efi, retain dict, display_name.
+/// `display_name` is the empty string when unset in config; the GUI
+/// treats `""` and absent identically.
+pub type StrainTuple = (String, Vec<String>, bool, Dict, String);
 
 pub fn strain_to_tuple(name: &str, cfg: &StrainConfig) -> DaemonResult<StrainTuple> {
     Ok((
@@ -23,6 +27,7 @@ pub fn strain_to_tuple(name: &str, cfg: &StrainConfig) -> DaemonResult<StrainTup
         cfg.subvolumes.clone(),
         cfg.efi,
         retain_to_dict(&cfg.retain)?,
+        cfg.display_name.clone().unwrap_or_default(),
     ))
 }
 

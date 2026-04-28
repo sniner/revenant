@@ -819,6 +819,7 @@ fn ensure_systemd_strains(
         config.strain.insert(
             boot_strain.to_string(),
             revenant_core::StrainConfig {
+                display_name: None,
                 retain: revenant_core::RetainConfig {
                     last: 5,
                     ..Default::default()
@@ -834,6 +835,7 @@ fn ensure_systemd_strains(
         config.strain.insert(
             periodic_strain.to_string(),
             revenant_core::StrainConfig {
+                display_name: None,
                 retain: revenant_core::RetainConfig {
                     last: 5,
                     hourly: 48,
@@ -865,6 +867,7 @@ fn ensure_pacman_strain(config: &mut revenant_core::Config, pacman_strain: &str)
     config.strain.insert(
         pacman_strain.to_string(),
         revenant_core::StrainConfig {
+            display_name: None,
             retain: revenant_core::RetainConfig {
                 last: 10,
                 ..Default::default()

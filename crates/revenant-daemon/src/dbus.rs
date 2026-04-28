@@ -138,6 +138,28 @@ impl Daemon {
         Ok(())
     }
 
+    /// Strain that holds the most recently created snapshot. Empty
+    /// string if no strain has any snapshot yet. Used by the GUI to
+    /// pick a sensible initial selection on launch.
+    async fn get_latest_strain(&self) -> Result<String, DaemonError> {
+        let ready = self.state.ready().await?;
+        let snapshots = discover_snapshots(ready.config(), &self.state.backend, ready.toplevel())
+            .map_err(map_core_error)?;
+        // SnapshotInfo carries no created-at directly when the sidecar
+        // is missing, but the id encodes a UTC timestamp — so falling
+        // back on it keeps the comparison meaningful.
+        Ok(snapshots
+            .iter()
+            .max_by_key(|s| {
+                s.metadata
+                    .as_ref()
+                    .map(|m| m.created_at.to_utc())
+                    .or_else(|| s.id.created_at())
+            })
+            .map(|s| s.strain.clone())
+            .unwrap_or_default())
+    }
+
     // -- Snapshots -----------------------------------------------------
 
     async fn list_snapshots(&self, filter: Dict) -> Result<Vec<Dict>, DaemonError> {

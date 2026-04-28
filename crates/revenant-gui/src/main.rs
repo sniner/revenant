@@ -59,6 +59,12 @@ struct AppState {
     /// Toast displayed while a CreateSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
     create_progress_toast: Option<adw::Toast>,
+    /// Strain to pre-select on the very first `Strains` event, sourced
+    /// from the daemon's `GetLatestStrain` reply. Consumed (taken) the
+    /// first time `apply_strains` runs without an existing user
+    /// selection; subsequent refreshes fall back to whatever the user
+    /// is currently looking at.
+    initial_pref_strain: Option<String>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
@@ -752,6 +758,13 @@ fn apply_event(
         Event::Strains(Ok(list)) => {
             apply_strains(widgets, state, cmd_tx, list);
         }
+        Event::LatestStrain(name) => {
+            // Cached for the next apply_strains call; skipped when the
+            // wire payload is empty (no snapshots anywhere).
+            if !name.is_empty() {
+                state.borrow_mut().initial_pref_strain = Some(name);
+            }
+        }
         Event::Strains(Err(reason)) => {
             tracing::warn!("ListStrains failed: {reason}");
             widgets.snapshot_error.set_description(Some(&reason));
@@ -980,13 +993,21 @@ fn apply_strains(
     // Preserve the user's selection across refreshes (e.g. when a
     // StrainConfigChanged signal triggers a re-fetch): keep the
     // currently-selected strain if it survived in the new list,
-    // otherwise fall back to the first.
+    // otherwise fall back to the daemon's "latest" hint, otherwise
+    // the first row. The hint is taken (consumed) so it only steers
+    // the very first apply_strains call.
     let prev_selected = state.borrow().selected_strain.clone();
+    let initial_pref = state.borrow_mut().initial_pref_strain.take();
     state.borrow_mut().strains = strains.clone();
 
     let target_idx = prev_selected
         .as_deref()
         .and_then(|sel| strains.iter().position(|s| s.name == sel))
+        .or_else(|| {
+            initial_pref
+                .as_deref()
+                .and_then(|sel| strains.iter().position(|s| s.name == sel))
+        })
         .or(if strains.is_empty() { None } else { Some(0) });
 
     match target_idx {

@@ -59,18 +59,23 @@ shown for clarity; serialization uses `zbus`/`zvariant` `SerializeDict`/
 `Type` derives where it pays off (extensible structs as `a{sv}`), and
 plain tuples otherwise.
 
-### `Strain` — `(sasba{sv})`
+### `Strain` — `(sasba{sv}s)`
 
 ```text
-name:        s    -- "default", "boot", ...
-subvolumes:  as   -- ["@", "@home"]
-efi:         b
-retention:   a{sv}  -- {"last": u32, "hourly": u32, "daily": u32, ...}
+name:          s     -- "default", "boot", ...
+subvolumes:    as    -- ["@", "@home"]
+efi:           b
+retention:     a{sv} -- {"last": u32, "hourly": u32, "daily": u32, ...}
+display_name:  s     -- friendly label or "" when not configured
 ```
 
 `retention` is an `a{sv}` (extensible dict) so future tiers don't break the
 wire format. Known keys: `last`, `hourly`, `daily`, `weekly`, `monthly`,
 `yearly`, all `u`. Missing keys mean "0 / disabled".
+
+`display_name` mirrors `[strain.<name>] display_name = "..."` from the
+config. The empty string means "no display name configured"; clients
+should fall back to `name`.
 
 ### `Snapshot` — `a{sv}`
 
@@ -115,8 +120,12 @@ GetDaemonInfo() -> (a{sv})                      -- {"version", "backend", "tople
 ### Strains
 
 ```text
-ListStrains() -> (a(sasba{sv}))                 -- array of Strain
-GetStrain(name: s) -> (sasba{sv})
+ListStrains() -> (a(sasba{sv}s))                -- array of Strain
+GetStrain(name: s) -> (sasba{sv}s)
+GetLatestStrain() -> (s)                        -- name of strain whose newest snapshot
+                                                --   has the most recent timestamp; "" if
+                                                --   no strain has any snapshot. Lets the
+                                                --   GUI pick a sensible initial selection.
 SetStrainRetention(name: s, retention: a{sv})   -- privileged: org.revenant.config.edit
 ```
 

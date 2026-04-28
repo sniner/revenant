@@ -243,6 +243,7 @@ pub fn build_config(detected: DetectedConfig) -> Config {
     };
 
     let default_strain = StrainConfig {
+        display_name: None,
         retain: RetainConfig::default(),
         subvolumes: vec![rootfs_subvol],
         efi: efi_enabled,

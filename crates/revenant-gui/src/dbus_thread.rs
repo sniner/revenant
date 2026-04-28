@@ -52,6 +52,11 @@ pub enum Event {
     /// Result of `ListStrains` (initial call or refresh after a
     /// `StrainConfigChanged` signal).
     Strains(Result<Vec<Strain>, String>),
+    /// Result of `GetLatestStrain` — name of the strain that holds the
+    /// most recently created snapshot, or `""` for "no preference".
+    /// Sent once at startup so the GUI can pick a sensible initial
+    /// selection. Emitted *before* the corresponding `Strains` event.
+    LatestStrain(String),
     /// Result of `GetLiveParent` (initial call or refresh after a
     /// `LiveParentChanged` signal). `Ok(None)` is the empty-dict
     /// sentinel ("pristine system / anchor lost").
@@ -284,6 +289,14 @@ async fn fetch_initial(client: &Client, evt_tx: &Sender<Event>) {
         .await
         .map_err(|e| format!("{e}"));
     let _ = evt_tx.send(Event::DaemonInfo(info)).await;
+
+    // Latest-strain hint goes out *before* the strain list so the
+    // sidebar handler can use it the first time it runs without
+    // racing a follow-up event. Errors are swallowed (we just lose
+    // the hint and fall back to first-alphabetical).
+    if let Ok(latest) = client.proxy().get_latest_strain().await {
+        let _ = evt_tx.send(Event::LatestStrain(latest)).await;
+    }
 
     let strains = client
         .proxy()

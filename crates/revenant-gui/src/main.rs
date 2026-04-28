@@ -530,7 +530,7 @@ fn present_restore_dialog(
          system will be rolled back at the next reboot.",
         snap.strain,
         format_created(snap),
-        snap.message.as_deref().unwrap_or("(no message)"),
+        format_message_items(&snap.message).unwrap_or_else(|| "(no message)".to_string()),
     );
 
     let dialog = adw::AlertDialog::builder()
@@ -881,7 +881,7 @@ fn snapshot_row(
         .spacing(2)
         .margin_start(28) // line up with the date (after the ★ slot)
         .build();
-    if let Some(desc) = snap.description() {
+    if let Some(desc) = format_message_items(&snap.message) {
         kv.append(&kv_pair("Description:", &desc));
     }
     if !snap.trigger.is_empty() && snap.trigger != "unknown" {
@@ -940,6 +940,17 @@ fn kv_pair(key: &str, value: &str) -> gtk::Box {
     row.append(&k);
     row.append(&v);
     row
+}
+
+/// Join a snapshot's metadata `message` into a human-readable summary,
+/// truncating long lists to keep the line scannable. Returns `None`
+/// for an empty list so callers can suppress the row entirely.
+fn format_message_items(items: &[String]) -> Option<String> {
+    match items.len() {
+        0 => None,
+        1..=3 => Some(items.join(", ")),
+        _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
+    }
 }
 
 /// Render the snapshot's timestamp for display in the row headline.
@@ -1178,7 +1189,12 @@ fn present_create_snapshot_dialog(
         if response != "create" {
             return;
         }
-        let message = message_row.text().to_string();
+        let text = message_row.text().to_string();
+        let message = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text]
+        };
 
         // Mark in-flight + disable the `+` button so a second click
         // during the polkit prompt can't queue a duplicate request.

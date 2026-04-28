@@ -64,11 +64,8 @@ pub fn snapshot_to_dict(
 
     let (trigger, message) = trigger_and_message(snap.metadata.as_ref());
     insert_str(&mut d, "trigger", trigger)?;
-    if let Some(msg) = message {
-        insert_str(&mut d, "message", msg)?;
-    }
-    if let Some(detail) = snap.metadata.as_ref().and_then(trigger_detail_text) {
-        insert_str(&mut d, "trigger_detail", &detail)?;
+    if !message.is_empty() {
+        insert_string_array(&mut d, "message", message)?;
     }
 
     let is_anchor = matches!(
@@ -87,39 +84,11 @@ pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {
     Ok(d)
 }
 
-/// Trigger-specific detail rendered as a string: pacman targets,
-/// systemd unit, or restore target. `None` when the trigger carries
-/// no payload of its own (e.g. plain manual snapshots). The user's
-/// `message` is *not* mixed in here — it stays on its own wire key
-/// so the client can compose the two however it wants.
-fn trigger_detail_text(meta: &SnapshotMetadata) -> Option<String> {
-    match meta.trigger.kind {
-        TriggerKind::Pacman => meta
-            .trigger
-            .pacman
-            .as_ref()
-            .map(|p| &p.targets[..])
-            .filter(|t| !t.is_empty())
-            .map(|t| {
-                if t.len() <= 3 {
-                    t.join(", ")
-                } else {
-                    format!("{}, {}, +{}", t[0], t[1], t.len() - 2)
-                }
-            }),
-        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => {
-            meta.trigger.systemd.as_ref().and_then(|s| s.unit.clone())
-        }
-        TriggerKind::Restore => meta.trigger.restore.as_ref().and_then(|r| r.target.clone()),
-        _ => None,
-    }
-}
-
-fn trigger_and_message(meta: Option<&SnapshotMetadata>) -> (&'static str, Option<&str>) {
+fn trigger_and_message(meta: Option<&SnapshotMetadata>) -> (&'static str, &[String]) {
     let Some(meta) = meta else {
-        return ("unknown", None);
+        return ("unknown", &[]);
     };
-    let trigger = match meta.trigger.kind {
+    let trigger = match meta.trigger {
         TriggerKind::Manual => "manual",
         TriggerKind::Pacman => "pacman",
         TriggerKind::SystemdBoot => "systemd-boot",
@@ -127,7 +96,7 @@ fn trigger_and_message(meta: Option<&SnapshotMetadata>) -> (&'static str, Option
         TriggerKind::Restore => "restore",
         TriggerKind::Unknown => "unknown",
     };
-    (trigger, meta.message.as_deref())
+    (trigger, meta.message.as_slice())
 }
 
 // ---- low-level encoding helpers ----------------------------------------
@@ -154,6 +123,14 @@ pub fn insert_bool(dict: &mut Dict, key: &str, value: bool) -> DaemonResult<()> 
 
 pub fn insert_u32(dict: &mut Dict, key: &str, value: u32) -> DaemonResult<()> {
     let v: OwnedValue = Value::new(value)
+        .try_to_owned()
+        .map_err(|e| DaemonError::Internal(format!("encode {key}: {e}")))?;
+    dict.insert(key.to_string(), v);
+    Ok(())
+}
+
+pub fn insert_string_array(dict: &mut Dict, key: &str, items: &[String]) -> DaemonResult<()> {
+    let v: OwnedValue = Value::new(items.to_vec())
         .try_to_owned()
         .map_err(|e| DaemonError::Internal(format!("encode {key}: {e}")))?;
     dict.insert(key.to_string(), v);

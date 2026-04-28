@@ -43,114 +43,27 @@ pub enum TriggerKind {
     Unknown,
 }
 
-/// Pacman-specific trigger context, captured from the PreTransaction hook.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PacmanTrigger {
-    /// Package target list from stdin (requires `NeedsTargets` in the hook).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<String>,
-}
-
-/// Systemd-unit trigger context.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemdTrigger {
-    /// The systemd unit that fired the snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-}
-
-/// Restore-specific trigger context.  Set on pre-restore safety snapshots
-/// created via `revenantctl restore --save-current`; carries the id of the
-/// snapshot that was about to be restored.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RestoreTrigger {
-    /// Id of the snapshot being restored when this pre-restore snapshot was taken.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
-}
-
-/// Structured trigger information for a snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Trigger {
-    pub kind: TriggerKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pacman: Option<PacmanTrigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub systemd: Option<SystemdTrigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub restore: Option<RestoreTrigger>,
-}
-
-impl Default for Trigger {
-    fn default() -> Self {
-        Self {
-            kind: TriggerKind::Unknown,
-            pacman: None,
-            systemd: None,
-            restore: None,
-        }
-    }
-}
-
-impl Trigger {
-    #[must_use]
-    pub fn manual() -> Self {
-        Self {
-            kind: TriggerKind::Manual,
-            ..Self::default()
-        }
-    }
-
-    #[must_use]
-    pub fn pacman(targets: Vec<String>) -> Self {
-        Self {
-            kind: TriggerKind::Pacman,
-            pacman: Some(PacmanTrigger { targets }),
-            ..Self::default()
-        }
-    }
-
-    #[must_use]
-    pub fn systemd(kind: TriggerKind, unit: Option<String>) -> Self {
-        debug_assert!(matches!(
-            kind,
-            TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic
-        ));
-        Self {
-            kind,
-            systemd: Some(SystemdTrigger { unit }),
-            ..Self::default()
-        }
-    }
-
-    #[must_use]
-    pub fn restore(target: String) -> Self {
-        Self {
-            kind: TriggerKind::Restore,
-            restore: Some(RestoreTrigger {
-                target: Some(target),
-            }),
-            ..Self::default()
-        }
-    }
-}
-
 /// Full metadata record written alongside a snapshot.
+///
+/// `message` is a free-form list of strings whose meaning depends on the
+/// trigger: pacman package names for `Pacman`, the unit name for the
+/// systemd triggers, the source snapshot id for `Restore`, or
+/// user-supplied notes for `Manual`. The display layer joins/truncates it
+/// uniformly without inspecting the trigger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
     /// Schema version; bumped when the on-disk format changes incompatibly.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
-    /// Free-form description supplied by the user via `--message`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
     /// Wall-clock creation time with fixed offset. Distinct from the UTC
     /// timestamp embedded in the snapshot id, so the sidecar is readable on
     /// its own. Stored as `FixedOffset` so the value is frozen at write
     /// time and does not shift when the reader's timezone changes.
     pub created_at: DateTime<FixedOffset>,
     #[serde(default)]
-    pub trigger: Trigger,
+    pub trigger: TriggerKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message: Vec<String>,
 }
 
 fn default_schema_version() -> u32 {
@@ -160,12 +73,12 @@ fn default_schema_version() -> u32 {
 impl SnapshotMetadata {
     /// Build a metadata record for a snapshot being created now.
     #[must_use]
-    pub fn new(message: Option<String>, trigger: Trigger) -> Self {
+    pub fn new(trigger: TriggerKind, message: Vec<String>) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            message,
             created_at: Local::now().fixed_offset(),
             trigger,
+            message,
         }
     }
 }
@@ -392,27 +305,47 @@ mod tests {
         let dir = tmpdir();
         let path = dir.join("x.meta.toml");
         let meta =
-            SnapshotMetadata::new(Some("pre-upgrade sanity check".into()), Trigger::manual());
+            SnapshotMetadata::new(TriggerKind::Manual, vec!["pre-upgrade sanity check".into()]);
         write(&path, &meta).unwrap();
         let loaded = read(&path).unwrap().unwrap();
-        assert_eq!(loaded.message.as_deref(), Some("pre-upgrade sanity check"));
-        assert_eq!(loaded.trigger.kind, TriggerKind::Manual);
+        assert_eq!(loaded.message, vec!["pre-upgrade sanity check".to_string()]);
+        assert_eq!(loaded.trigger, TriggerKind::Manual);
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn round_trip_pacman_with_targets() {
+    fn round_trip_manual_without_message_omits_field() {
+        let dir = tmpdir();
+        let path = dir.join("m.meta.toml");
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec![]);
+        write(&path, &meta).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !serialized.contains("message"),
+            "empty message must be skipped on serialize, got:\n{serialized}"
+        );
+        let loaded = read(&path).unwrap().unwrap();
+        assert!(loaded.message.is_empty());
+        assert_eq!(loaded.trigger, TriggerKind::Manual);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn round_trip_pacman_with_packages() {
         let dir = tmpdir();
         let path = dir.join("p.meta.toml");
-        let meta =
-            SnapshotMetadata::new(None, Trigger::pacman(vec!["linux".into(), "mesa".into()]));
+        let meta = SnapshotMetadata::new(
+            TriggerKind::Pacman,
+            vec!["linux".into(), "mesa".into(), "glibc".into()],
+        );
         write(&path, &meta).unwrap();
         let loaded = read(&path).unwrap().unwrap();
-        assert_eq!(loaded.trigger.kind, TriggerKind::Pacman);
-        let pac = loaded.trigger.pacman.as_ref().unwrap();
-        assert_eq!(pac.targets, vec!["linux".to_string(), "mesa".to_string()]);
-        assert!(loaded.trigger.systemd.is_none());
+        assert_eq!(loaded.trigger, TriggerKind::Pacman);
+        assert_eq!(
+            loaded.message,
+            vec!["linux".to_string(), "mesa".to_string(), "glibc".to_string()]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -421,44 +354,26 @@ mod tests {
         let dir = tmpdir();
         let path = dir.join("s.meta.toml");
         let meta = SnapshotMetadata::new(
-            None,
-            Trigger::systemd(
-                TriggerKind::SystemdBoot,
-                Some("revenant-boot.service".into()),
-            ),
+            TriggerKind::SystemdBoot,
+            vec!["revenant-boot.service".into()],
         );
         write(&path, &meta).unwrap();
         let loaded = read(&path).unwrap().unwrap();
-        assert_eq!(loaded.trigger.kind, TriggerKind::SystemdBoot);
-        assert_eq!(
-            loaded
-                .trigger
-                .systemd
-                .as_ref()
-                .and_then(|s| s.unit.as_deref()),
-            Some("revenant-boot.service")
-        );
+        assert_eq!(loaded.trigger, TriggerKind::SystemdBoot);
+        assert_eq!(loaded.message, vec!["revenant-boot.service".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn round_trip_restore_with_target() {
+    fn round_trip_restore_with_source() {
         let dir = tmpdir();
         let path = dir.join("r.meta.toml");
-        let meta = SnapshotMetadata::new(None, Trigger::restore("20260420-230031".into()));
+        let meta =
+            SnapshotMetadata::new(TriggerKind::Restore, vec!["default@20260420-230031".into()]);
         write(&path, &meta).unwrap();
         let loaded = read(&path).unwrap().unwrap();
-        assert_eq!(loaded.trigger.kind, TriggerKind::Restore);
-        assert_eq!(
-            loaded
-                .trigger
-                .restore
-                .as_ref()
-                .and_then(|r| r.target.as_deref()),
-            Some("20260420-230031")
-        );
-        assert!(loaded.trigger.pacman.is_none());
-        assert!(loaded.trigger.systemd.is_none());
+        assert_eq!(loaded.trigger, TriggerKind::Restore);
+        assert_eq!(loaded.message, vec!["default@20260420-230031".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -480,17 +395,14 @@ mod tests {
         let text = r#"
 schema_version = 99
 created_at = "2026-04-14T14:05:01+02:00"
-message = "hello"
+trigger = "manual"
+message = ["hello"]
 future_field = "ignored"
-
-[trigger]
-kind = "manual"
-future_nested = 1
 "#;
         std::fs::write(&path, text).unwrap();
         let loaded = read(&path).unwrap().unwrap();
-        assert_eq!(loaded.message.as_deref(), Some("hello"));
-        assert_eq!(loaded.trigger.kind, TriggerKind::Manual);
+        assert_eq!(loaded.message, vec!["hello".to_string()]);
+        assert_eq!(loaded.trigger, TriggerKind::Manual);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -506,7 +418,7 @@ future_nested = 1
     fn remove_existing_deletes() {
         let dir = tmpdir();
         let path = dir.join("r.meta.toml");
-        write(&path, &SnapshotMetadata::new(None, Trigger::manual())).unwrap();
+        write(&path, &SnapshotMetadata::new(TriggerKind::Manual, vec![])).unwrap();
         assert!(path.exists());
         remove(&path).unwrap();
         assert!(!path.exists());
@@ -526,7 +438,7 @@ future_nested = 1
         let paired = dir.join("default-20260316-143022.meta.toml");
         std::fs::write(
             &paired,
-            "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n",
+            "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\ntrigger = \"manual\"\n",
         )
         .unwrap();
 
@@ -534,7 +446,7 @@ future_nested = 1
         let orphan = dir.join("default-20260101-000000.meta.toml");
         std::fs::write(
             &orphan,
-            "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n",
+            "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\ntrigger = \"manual\"\n",
         )
         .unwrap();
 

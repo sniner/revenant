@@ -57,7 +57,7 @@ pub trait Daemon {
 
     fn get_live_parent(&self) -> zbus::Result<Dict>;
 
-    fn create_snapshot(&self, strain: &str, message: &str) -> zbus::Result<Dict>;
+    fn create_snapshot(&self, strain: &str, message: Vec<String>) -> zbus::Result<Dict>;
 
     fn delete_snapshot(&self, strain: &str, id: &str) -> zbus::Result<()>;
 

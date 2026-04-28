@@ -88,8 +88,7 @@ Defined keys (initial set):
 | `strain`           | `s`  | Strain name.                                             |
 | `created`          | `s`  | RFC 3339 timestamp.                                      |
 | `trigger`          | `s`  | `manual` \| `pacman` \| `systemd-boot` \| `systemd-periodic` \| `restore` \| `unknown`. |
-| `message`          | `s`  | User-supplied note (may be empty).                       |
-| `trigger_detail`   | `s`  | Trigger-specific payload as a string (pacman targets, systemd unit, restore target). Key omitted when the trigger has no detail of its own; clients combine with `message` themselves to build a display line. |
+| `message`          | `as` | Trigger-dependent list. `manual`: user note(s). `pacman`: package names. `systemd-boot`/`-periodic`: unit name. `restore`: source snapshot reference (`strain@id`). Omitted entirely if empty. |
 | `is_live_anchor`   | `b`  | True if this snapshot is the parent of the live rootfs (mirror of CLI `*` marker; matches `revenant_core::snapshot::resolve_live_parent`). |
 | `is_protected`     | `b`  | True if retention currently protects this snapshot.      |
 | `size_bytes`       | `t`  | Best-effort size; `0` if unknown.                        |
@@ -143,17 +142,18 @@ remains a config-file edit.
 ```text
 ListSnapshots(filter: a{sv}) -> (aa{sv})        -- filter: optional {"strain": s}
 GetSnapshot(strain: s, id: s) -> (a{sv})
-CreateSnapshot(strain: s, message: s) -> (a{sv}) -- privileged: org.revenant.snapshot.create
-                                                 --   returns the new Snapshot dict
-DeleteSnapshot(strain: s, id: s) -> ()          -- privileged: org.revenant.snapshot.delete
+CreateSnapshot(strain: s, message: as) -> (a{sv}) -- privileged: org.revenant.snapshot.create
+                                                  --   returns the new Snapshot dict
+DeleteSnapshot(strain: s, id: s) -> ()           -- privileged: org.revenant.snapshot.delete
 ```
 
 `CreateSnapshot` and `DeleteSnapshot` complete well under a second
 on btrfs, so they return synchronously rather than going through the
-`OperationHandle` pattern. Pass the empty string as `message` to omit
-it. Both operations cause the inotify watcher to fire
-`SnapshotsChanged`, which is how unprivileged subscribers learn about
-the change — the methods do not emit anything themselves.
+`OperationHandle` pattern. Pass an empty array as `message` to omit it
+(snapshots taken via the GUI are always tagged `manual`). Both
+operations cause the inotify watcher to fire `SnapshotsChanged`, which
+is how unprivileged subscribers learn about the change — the methods do
+not emit anything themselves.
 
 ### Live state
 

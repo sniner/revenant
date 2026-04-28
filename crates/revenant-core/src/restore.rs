@@ -224,7 +224,7 @@ mod tests {
 
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::metadata::Trigger;
+    use crate::metadata::TriggerKind;
     use crate::snapshot::{SnapshotId, create_snapshot, discover_snapshots};
 
     /// Build a no-EFI Config with one strain `default` covering the given subvols.
@@ -369,8 +369,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
 

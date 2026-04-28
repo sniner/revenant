@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::path::Path;
 
 use revenant_core::check::{Finding, Severity};
-use revenant_core::metadata::Trigger;
+use revenant_core::metadata::TriggerKind;
 use revenant_core::preflight::{MACHINED_RUNTIME_DIR, preflight_restore};
 use revenant_core::restore::restore_snapshot as core_restore_snapshot;
 use revenant_core::snapshot::{
@@ -202,7 +202,7 @@ impl Daemon {
     async fn create_snapshot(
         &self,
         strain: &str,
-        message: &str,
+        message: Vec<String>,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> Result<Dict, DaemonError> {
@@ -212,18 +212,13 @@ impl Daemon {
         polkit::check(conn, sender.as_str(), "org.revenant.snapshot.create").await?;
 
         let ready = self.state.ready().await?;
-        let msg = if message.is_empty() {
-            None
-        } else {
-            Some(message.to_string())
-        };
         let info = core_create_snapshot(
             ready.config(),
             &self.state.backend,
             ready.toplevel(),
             strain,
-            msg,
-            Trigger::manual(),
+            TriggerKind::Manual,
+            message,
         )
         .map_err(map_core_error)?;
 
@@ -337,16 +332,17 @@ impl Daemon {
 
         let pre_restore = if save_current {
             // Mirror the CLI: --save-current creates a strain-internal
-            // snapshot tagged with `Trigger::restore(<target id>)`. If
-            // this fails we abort *before* touching live subvolumes —
-            // the whole point of save_current is a safety net.
+            // snapshot tagged with `TriggerKind::Restore` and the source
+            // snapshot id as the message. If this fails we abort *before*
+            // touching live subvolumes — the whole point of save_current
+            // is a safety net.
             let info = core_create_snapshot(
                 ready.config(),
                 &self.state.backend,
                 ready.toplevel(),
                 strain,
-                None,
-                Trigger::restore(snapshot.id.to_string()),
+                TriggerKind::Restore,
+                vec![snapshot.id.to_string()],
             )
             .map_err(map_core_error)?;
             Some(info)

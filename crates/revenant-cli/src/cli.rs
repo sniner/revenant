@@ -72,19 +72,20 @@ pub enum Command {
         /// Strain to snapshot. Defaults to `default`.
         #[arg(default_value = "default")]
         strain: String,
-        /// Optional free-form description stored in the snapshot's
-        /// metadata sidecar. Useful for labelling manual snapshots.
-        #[arg(short, long)]
-        message: Option<String>,
+        /// Free-form message item stored in the snapshot's metadata
+        /// sidecar. Repeat the flag to attach multiple items (e.g. one
+        /// per package). Useful for labelling manual snapshots.
+        #[arg(short, long = "message")]
+        message: Vec<String>,
         /// Trigger kind recorded in metadata. Defaults to `manual`.
         /// Package-manager hooks and systemd units pass this themselves;
         /// it is rarely useful on the command line directly.
         #[arg(long, value_enum, hide = true)]
         trigger: Option<TriggerKindArg>,
-        /// Systemd unit that fired this snapshot, recorded alongside
-        /// `--trigger systemd-boot` / `systemd-periodic`.
+        /// Read additional message items from stdin, one per line. Used
+        /// by the pacman hook to feed the package list (`NeedsTargets`).
         #[arg(long, hide = true)]
-        trigger_unit: Option<String>,
+        from_stdin: bool,
     },
     /// List snapshots, optionally filtered by strain (e.g. `default@`).
     List {

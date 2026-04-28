@@ -37,10 +37,10 @@ impl PackageManager for Pacman {
         //
         // `NeedsTargets` in [Trigger] makes pacman feed the affected
         // package names to the hook on stdin; `revenantctl snapshot`
-        // reads them when `--trigger pacman` is passed and records them
-        // in the snapshot's metadata sidecar.
+        // appends them to the metadata message when `--from-stdin` is
+        // passed.
         let exec = format!(
-            "/bin/sh -c '{} --config {} snapshot {} --trigger pacman || true'",
+            "/bin/sh -c '{} --config {} snapshot {} --trigger pacman --from-stdin || true'",
             params.bin_path.display(),
             params.config_path.display(),
             params.strain,
@@ -147,7 +147,11 @@ mod tests {
         );
         assert!(
             content.contains("--trigger pacman"),
-            "Exec must pass --trigger pacman so revenantctl knows to read stdin"
+            "Exec must pass --trigger pacman so the snapshot is tagged correctly"
+        );
+        assert!(
+            content.contains("--from-stdin"),
+            "Exec must pass --from-stdin so revenantctl reads the package list from stdin"
         );
     }
 

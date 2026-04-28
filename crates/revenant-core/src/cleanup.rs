@@ -700,12 +700,12 @@ last = 1
         // in the mock, so the sidecar must be kept.
         mock.seed_subvolume(snap_dir.join("@-default-20260316-143022"));
         let kept_sidecar = snap_dir.join("default-20260316-143022.meta.toml");
-        std::fs::write(&kept_sidecar, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+        std::fs::write(&kept_sidecar, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\ntrigger = \"manual\"\n").unwrap();
 
         // Orphan — no subvolume with (strain=default, id=20260101-000000).
         let orphan_name = "default-20260101-000000.meta.toml";
         let orphan_path = snap_dir.join(orphan_name);
-        std::fs::write(&orphan_path, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+        std::fs::write(&orphan_path, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\ntrigger = \"manual\"\n").unwrap();
 
         let removed = purge_orphaned_sidecars(&config, &mock, &dir).unwrap();
         assert_eq!(removed, vec![orphan_name.to_string()]);

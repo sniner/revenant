@@ -20,7 +20,7 @@ use common::TestFs;
 use revenant_core::backend::FileSystemBackend;
 use revenant_core::backend::btrfs::BtrfsBackend;
 use revenant_core::config::Config;
-use revenant_core::metadata::Trigger;
+use revenant_core::metadata::TriggerKind;
 use revenant_core::restore::restore_snapshot;
 use revenant_core::snapshot::{create_snapshot, find_snapshot};
 
@@ -256,8 +256,8 @@ fn e2e_create_snapshot_against_real_backend() {
         &backend,
         &fs.mount,
         "default",
-        None,
-        Trigger::default(),
+        TriggerKind::Unknown,
+        vec![],
     )
     .unwrap();
     assert_eq!(info.strain, "default");
@@ -292,8 +292,8 @@ fn e2e_restore_rolls_back_live_state() {
         &backend,
         &fs.mount,
         "default",
-        None,
-        Trigger::default(),
+        TriggerKind::Unknown,
+        vec![],
     )
     .unwrap();
     let snap_id = snap.id.clone();
@@ -360,8 +360,8 @@ fn e2e_restore_preserves_nested_subvol_data() {
         &backend,
         &fs.mount,
         "default",
-        None,
-        Trigger::default(),
+        TriggerKind::Unknown,
+        vec![],
     )
     .unwrap();
     let snap_id = snap.id.clone();
@@ -421,8 +421,8 @@ fn e2e_restore_creates_parent_path_for_nested_added_after_snapshot() {
         &backend,
         &fs.mount,
         "default",
-        None,
-        Trigger::default(),
+        TriggerKind::Unknown,
+        vec![],
     )
     .unwrap();
     let snap_id = snap.id.clone();

@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::config::Config;
 use crate::error::{Result, RevenantError};
-use crate::metadata::{self, SnapshotMetadata, Trigger};
+use crate::metadata::{self, SnapshotMetadata, TriggerKind};
 
 /// Snapshot identifier based on UTC timestamp: `YYYYMMDD-HHMMSS-NNN`,
 /// where the trailing three digits are milliseconds. Legacy IDs without
@@ -531,8 +531,8 @@ pub fn create_snapshot(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     strain_name: &str,
-    message: Option<String>,
-    trigger: Trigger,
+    trigger: TriggerKind,
+    message: Vec<String>,
 ) -> Result<SnapshotInfo> {
     let strain_config = config.strain(strain_name)?;
     let id = SnapshotId::now();
@@ -593,7 +593,7 @@ pub fn create_snapshot(
 
     // Best-effort sidecar write: the subvolumes already exist, so metadata
     // loss is preferable to failing a snapshot that is otherwise intact.
-    let metadata = SnapshotMetadata::new(message, trigger);
+    let metadata = SnapshotMetadata::new(trigger, message);
     let sidecar = sidecar_path_for_snapshot(&snap_dir, strain_name, &info.id);
     match metadata::write(&sidecar, &metadata) {
         Ok(()) => info.metadata = Some(metadata),
@@ -863,8 +863,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         assert_eq!(info.strain, "default");
@@ -893,8 +893,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         assert!(mock.contains(toplevel.join("@snapshots")));
@@ -913,8 +913,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         let mut subs = info.subvolumes.clone();
@@ -938,8 +938,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "nonexistent",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap_err();
         assert!(format!("{err}").contains("nonexistent"));
@@ -957,8 +957,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         let snaps = discover_snapshots(&config, &mock, toplevel).unwrap();
@@ -981,8 +981,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         let snap_dir = toplevel.join("@snapshots");
@@ -1008,8 +1008,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         // Delete twice — second call should be a no-op, not an error
@@ -1079,8 +1079,8 @@ subvolumes = [{subvol_list}]
             &mock,
             &toplevel,
             "default",
-            Some("ci test".into()),
-            Trigger::manual(),
+            TriggerKind::Manual,
+            vec!["ci test".into()],
         )
         .unwrap();
 
@@ -1089,8 +1089,8 @@ subvolumes = [{subvol_list}]
             .join(format!("default-{}.meta.toml", info.id.as_str()));
         assert!(sidecar.exists(), "sidecar should be written on disk");
         let meta = read(&sidecar).unwrap().unwrap();
-        assert_eq!(meta.message.as_deref(), Some("ci test"));
-        assert_eq!(meta.trigger.kind, TriggerKind::Manual);
+        assert_eq!(meta.message, vec!["ci test".to_string()]);
+        assert_eq!(meta.trigger, TriggerKind::Manual);
         assert!(info.metadata.is_some());
 
         std::fs::remove_dir_all(&toplevel).ok();
@@ -1108,14 +1108,14 @@ subvolumes = [{subvol_list}]
         let sidecar = toplevel
             .join("@snapshots")
             .join("default-20260316-143022.meta.toml");
-        let meta = SnapshotMetadata::new(Some("hello".into()), Trigger::manual());
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec!["hello".into()]);
         write(&sidecar, &meta).unwrap();
 
         let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
         assert_eq!(snaps.len(), 1);
         let m = snaps[0].metadata.as_ref().expect("metadata attached");
-        assert_eq!(m.message.as_deref(), Some("hello"));
-        assert_eq!(m.trigger.kind, TriggerKind::Manual);
+        assert_eq!(m.message, vec!["hello".to_string()]);
+        assert_eq!(m.trigger, TriggerKind::Manual);
 
         std::fs::remove_dir_all(&toplevel).ok();
     }
@@ -1157,8 +1157,8 @@ subvolumes = [{subvol_list}]
             &mock,
             &toplevel,
             "default",
-            Some("anchor-test".into()),
-            Trigger::manual(),
+            TriggerKind::Manual,
+            vec!["anchor-test".into()],
         )
         .unwrap();
 
@@ -1169,8 +1169,8 @@ subvolumes = [{subvol_list}]
             .metadata
             .as_ref()
             .expect("metadata must survive subvolume reorder");
-        assert_eq!(m.message.as_deref(), Some("anchor-test"));
-        assert_eq!(m.trigger.kind, TriggerKind::Manual);
+        assert_eq!(m.message, vec!["anchor-test".to_string()]);
+        assert_eq!(m.trigger, TriggerKind::Manual);
 
         std::fs::remove_dir_all(&toplevel).ok();
     }
@@ -1189,8 +1189,8 @@ subvolumes = [{subvol_list}]
             &mock,
             &toplevel,
             "default",
-            Some("m".into()),
-            Trigger::manual(),
+            TriggerKind::Manual,
+            vec!["m".into()],
         )
         .unwrap();
         let sidecar = toplevel
@@ -1248,8 +1248,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         assert!(resolve_live_parent(&config, &mock, toplevel).is_none());
@@ -1266,8 +1266,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
 
@@ -1292,8 +1292,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         let snap_path = toplevel
@@ -1319,8 +1319,8 @@ subvolumes = [{subvol_list}]
             &mock,
             toplevel,
             "default",
-            None,
-            Trigger::default(),
+            TriggerKind::Unknown,
+            vec![],
         )
         .unwrap();
         // Different timestamp so the two snapshots never collide.

@@ -476,7 +476,7 @@ subvolumes = [{subvol_list}]
 
     fn write_sidecar(snap_dir: &Path, stem: &str) -> std::path::PathBuf {
         let p = snap_dir.join(format!("{stem}{}", metadata::SIDECAR_EXTENSION));
-        std::fs::write(&p, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\n[trigger]\nkind = \"manual\"\n").unwrap();
+        std::fs::write(&p, "schema_version = 1\ncreated_at = \"2026-04-14T14:05:01+02:00\"\ntrigger = \"manual\"\n").unwrap();
         p
     }
 

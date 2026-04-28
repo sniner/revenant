@@ -22,10 +22,11 @@ pub struct UnitFile {
 /// means renaming the unit file no longer requires a matching code
 /// change here — the running binary will always see the correct name.
 fn exec_start(bin_path: &Path, config_path: &Path, strain: &str, trigger: &str) -> String {
-    // Strain is the positional argument; `--trigger` / `--trigger-unit`
-    // remain flags because they carry metadata, not addressing.
+    // Strain is the positional argument; `--trigger` carries the
+    // trigger kind, `-m %n` records the unit name as a message item
+    // so the metadata sidecar shows what fired the snapshot.
     format!(
-        "{} --config {} snapshot {} --trigger {} --trigger-unit %n",
+        "{} --config {} snapshot {} --trigger {} -m %n",
         bin_path.display(),
         config_path.display(),
         strain,
@@ -177,8 +178,8 @@ mod tests {
         // time — no coupling to any hardcoded literal in this crate.
         let units = generate_units(&test_params());
         assert!(units[0].content.contains("--trigger systemd-boot"));
-        assert!(units[0].content.contains("--trigger-unit %n"));
+        assert!(units[0].content.contains("-m %n"));
         assert!(units[1].content.contains("--trigger systemd-periodic"));
-        assert!(units[1].content.contains("--trigger-unit %n"));
+        assert!(units[1].content.contains("-m %n"));
     }
 }

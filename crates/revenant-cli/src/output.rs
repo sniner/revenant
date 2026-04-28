@@ -51,31 +51,11 @@ pub fn emit_json_error(msg: &str) {
 // SnapshotMetadata struct directly via serde).
 // ---------------------------------------------------------------------
 
-/// Truncate a string to at most `max` characters, appending `…` when cut.
-///
-/// Single pass: greedily take `max` chars; if the iterator is drained
-/// the string fit, otherwise drop the last one and append an ellipsis.
-fn truncate(s: &str, max: usize) -> String {
-    if max == 0 {
-        return String::new();
-    }
-    let mut it = s.chars();
-    let head: String = it.by_ref().take(max).collect();
-    if it.next().is_none() {
-        head
-    } else {
-        // Re-take up to `max - 1` to leave room for the ellipsis.
-        let mut out: String = head.chars().take(max - 1).collect();
-        out.push('…');
-        out
-    }
-}
-
 /// Render a compact one-line summary of the metadata for humans. The
 /// caller decides where to put it (list rows use a subordinate line, the
 /// create/restore flows can print it underneath the primary line).
 fn metadata_summary(meta: &SnapshotMetadata) -> String {
-    let kind = match meta.trigger.kind {
+    let kind = match meta.trigger {
         TriggerKind::Manual => "manual",
         TriggerKind::Pacman => "pacman",
         TriggerKind::SystemdBoot => "systemd-boot",
@@ -83,45 +63,22 @@ fn metadata_summary(meta: &SnapshotMetadata) -> String {
         TriggerKind::Restore => "pre-restore",
         TriggerKind::Unknown => "unknown",
     };
+    match format_message_items(&meta.message) {
+        Some(s) => format!("{kind}: {s}"),
+        None => kind.to_string(),
+    }
+}
 
-    let detail = match meta.trigger.kind {
-        TriggerKind::Pacman => {
-            let t = meta
-                .trigger
-                .pacman
-                .as_ref()
-                .map(|p| &p.targets[..])
-                .unwrap_or(&[]);
-            if t.is_empty() {
-                String::new()
-            } else if t.len() <= 3 {
-                format!(": {}", t.join(", "))
-            } else {
-                format!(": {}, {}, +{}", t[0], t[1], t.len() - 2)
-            }
-        }
-        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => meta
-            .trigger
-            .systemd
-            .as_ref()
-            .and_then(|s| s.unit.as_deref())
-            .map_or_else(String::new, |u| format!(" ({u})")),
-        TriggerKind::Restore => meta
-            .trigger
-            .restore
-            .as_ref()
-            .and_then(|r| r.target.as_deref())
-            .map_or_else(String::new, |t| format!(": {t}")),
-        _ => String::new(),
-    };
-
-    let message = meta
-        .message
-        .as_deref()
-        .map(|m| format!(" — \"{}\"", truncate(m, 60)))
-        .unwrap_or_default();
-
-    format!("{kind}{detail}{message}")
+/// Join a metadata message vector into a single human-readable string,
+/// truncating long lists to keep the summary one line. Returns `None`
+/// if the list is empty so callers can suppress the entire detail
+/// segment cleanly.
+fn format_message_items(items: &[String]) -> Option<String> {
+    match items.len() {
+        0 => None,
+        1..=3 => Some(items.join(", ")),
+        _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -872,11 +829,11 @@ mod tests {
 
     #[test]
     fn list_json_includes_metadata_when_present() {
-        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
         let mut snap = sample_snapshot("20260411-080000", "pacman", false);
         snap.metadata = Some(SnapshotMetadata::new(
-            Some("test".into()),
-            Trigger::pacman(vec!["linux".into(), "mesa".into()]),
+            TriggerKind::Pacman,
+            vec!["linux".into(), "mesa".into()],
         ));
         let out = SnapshotListOutput {
             snapshots: std::slice::from_ref(&snap),
@@ -884,12 +841,8 @@ mod tests {
         };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         let meta = &got["snapshots"][0]["metadata"];
-        assert_eq!(meta["message"], json!("test"));
-        assert_eq!(meta["trigger"]["kind"], json!("pacman"));
-        assert_eq!(
-            meta["trigger"]["pacman"]["targets"],
-            json!(["linux", "mesa"])
-        );
+        assert_eq!(meta["trigger"], json!("pacman"));
+        assert_eq!(meta["message"], json!(["linux", "mesa"]));
     }
 
     #[test]
@@ -940,58 +893,47 @@ mod tests {
 
     #[test]
     fn metadata_summary_manual_with_message() {
-        use revenant_core::metadata::{SnapshotMetadata, Trigger};
-        let meta = SnapshotMetadata::new(Some("pre-upgrade".into()), Trigger::manual());
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec!["pre-upgrade".into()]);
         let s = metadata_summary(&meta);
-        assert!(s.starts_with("manual"));
-        assert!(s.contains("pre-upgrade"));
+        assert_eq!(s, "manual: pre-upgrade");
+    }
+
+    #[test]
+    fn metadata_summary_manual_without_message_drops_detail() {
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec![]);
+        assert_eq!(metadata_summary(&meta), "manual");
     }
 
     #[test]
     fn metadata_summary_pacman_truncates_long_target_list() {
-        use revenant_core::metadata::{SnapshotMetadata, Trigger};
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
         let meta = SnapshotMetadata::new(
-            None,
-            Trigger::pacman(vec![
-                "a".into(),
-                "b".into(),
-                "c".into(),
-                "d".into(),
-                "e".into(),
-            ]),
+            TriggerKind::Pacman,
+            vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
         );
         let s = metadata_summary(&meta);
-        assert!(s.contains("pacman"));
-        assert!(s.contains("a, b, +3"));
+        assert_eq!(s, "pacman: a, b, +3");
     }
 
     #[test]
-    fn metadata_summary_restore_shows_target_id() {
-        use revenant_core::metadata::{SnapshotMetadata, Trigger};
-        let meta = SnapshotMetadata::new(None, Trigger::restore("20260420-230031".into()));
+    fn metadata_summary_restore_shows_source_id() {
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
+        let meta = SnapshotMetadata::new(TriggerKind::Restore, vec!["20260420-230031".into()]);
         let s = metadata_summary(&meta);
         assert_eq!(s, "pre-restore: 20260420-230031");
     }
 
     #[test]
     fn metadata_summary_systemd_shows_unit() {
-        use revenant_core::metadata::{SnapshotMetadata, Trigger, TriggerKind};
+        use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
         let meta = SnapshotMetadata::new(
-            None,
-            Trigger::systemd(
-                TriggerKind::SystemdBoot,
-                Some("revenant-boot.service".into()),
-            ),
+            TriggerKind::SystemdBoot,
+            vec!["revenant-boot.service".into()],
         );
         let s = metadata_summary(&meta);
-        assert!(s.contains("systemd-boot"));
-        assert!(s.contains("revenant-boot.service"));
-    }
-
-    #[test]
-    fn truncate_longer_than_max() {
-        assert_eq!(truncate("hello", 3), "he…");
-        assert_eq!(truncate("hi", 3), "hi");
+        assert_eq!(s, "systemd-boot: revenant-boot.service");
     }
 
     #[test]

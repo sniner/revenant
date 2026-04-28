@@ -127,9 +127,12 @@ pub enum Command {
     },
     /// Issue a privileged `CreateSnapshot` call. Worker replies with
     /// `Event::CreateSnapshotResult`. Polkit prompt happens inside
-    /// the daemon. `message` is passed verbatim — empty string is
-    /// the daemon's "no message" sentinel.
-    CreateSnapshot { strain: String, message: String },
+    /// the daemon. `message` is the metadata sidecar's message vector;
+    /// pass an empty vec to omit it.
+    CreateSnapshot {
+        strain: String,
+        message: Vec<String>,
+    },
 }
 
 /// Worker handle returned to the GUI thread.
@@ -337,7 +340,7 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
             let _ = evt_tx.send(Event::RetentionResult { strain, result }).await;
         }
         Command::CreateSnapshot { strain, message } => {
-            let result = create_snapshot(client, &strain, &message).await;
+            let result = create_snapshot(client, &strain, message).await;
             let _ = evt_tx
                 .send(Event::CreateSnapshotResult { strain, result })
                 .await;
@@ -345,7 +348,11 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
     }
 }
 
-async fn create_snapshot(client: &Client, strain: &str, message: &str) -> Result<Snapshot, String> {
+async fn create_snapshot(
+    client: &Client,
+    strain: &str,
+    message: Vec<String>,
+) -> Result<Snapshot, String> {
     let raw = client
         .proxy()
         .create_snapshot(strain, message)

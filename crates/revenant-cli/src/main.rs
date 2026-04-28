@@ -145,16 +145,9 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             strain,
             message,
             trigger,
-            trigger_unit,
+            from_stdin,
         } => cmd_snapshot(
-            mode,
-            &config,
-            &backend,
-            &toplevel,
-            &strain,
-            message,
-            trigger,
-            trigger_unit,
+            mode, &config, &backend, &toplevel, &strain, message, trigger, from_stdin,
         ),
         cli::Command::List { target } => {
             cmd_list(mode, &config, &backend, &toplevel, target.as_deref())
@@ -283,56 +276,30 @@ fn recover_pending_orphans(
     Ok(())
 }
 
-/// Convert the CLI-surface trigger flags into a core `Trigger`.
+/// Build the message vector for the snapshot, optionally appending
+/// items read from stdin (one per line).
 ///
-/// For `--trigger pacman` we also read the package targets from stdin,
-/// which is what the pacman PreTransaction hook feeds us when the hook
-/// is generated with `NeedsTargets` (see `pkgmgr::pacman`). A read
-/// failure does not fail the snapshot: we just record an empty target
-/// list and let the user see what we got.
-fn build_trigger(
-    trigger: Option<cli::TriggerKindArg>,
-    trigger_unit: Option<String>,
-) -> revenant_core::metadata::Trigger {
-    use revenant_core::metadata::{Trigger, TriggerKind};
-
-    let kind: TriggerKind = trigger.map_or(TriggerKind::Manual, Into::into);
-
-    match kind {
-        TriggerKind::Manual | TriggerKind::Unknown => Trigger {
-            kind,
-            ..Trigger::default()
-        },
-        TriggerKind::Pacman => {
-            let targets = read_stdin_lines().unwrap_or_else(|e| {
-                tracing::warn!("failed to read pacman targets from stdin: {e}");
-                Vec::new()
-            });
-            Trigger::pacman(targets)
+/// The pacman PreTransaction hook pipes the package list into stdin via
+/// `NeedsTargets`; we expose this through the explicit `--from-stdin`
+/// flag rather than auto-detecting non-TTY stdin so the behaviour is
+/// self-documenting in the hook config. A read failure is logged but
+/// does not fail the snapshot — losing the target list is preferable to
+/// failing an otherwise intact snapshot.
+fn build_message(message: Vec<String>, from_stdin: bool) -> Vec<String> {
+    let mut out = message;
+    if from_stdin {
+        match read_stdin_lines() {
+            Ok(extra) => out.extend(extra),
+            Err(e) => tracing::warn!("failed to read message items from stdin: {e}"),
         }
-        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => {
-            Trigger::systemd(kind, trigger_unit)
-        }
-        // Restore is created internally by the --save-current path and
-        // is not selectable via the CLI `--trigger` flag (see
-        // `cli::TriggerKindArg`), so this arm is unreachable in practice.
-        TriggerKind::Restore => unreachable!("Restore trigger is not CLI-selectable"),
     }
+    out
 }
 
 /// Read stdin as a list of non-empty, trimmed lines.
-///
-/// Returns an empty vector immediately if stdin is attached to a
-/// terminal: a `revenantctl snapshot --trigger pacman` invoked by a
-/// human would otherwise block on `read` until the user manually sent
-/// EOF. The pacman PreTransaction hook always pipes the target list in,
-/// so it never hits this branch.
 fn read_stdin_lines() -> std::io::Result<Vec<String>> {
-    use std::io::{BufRead, IsTerminal};
+    use std::io::BufRead;
     let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Ok(Vec::new());
-    }
     let mut out = Vec::new();
     for line in stdin.lock().lines() {
         let line = line?;
@@ -351,15 +318,17 @@ fn cmd_snapshot(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     strain: &str,
-    message: Option<String>,
+    message: Vec<String>,
     trigger: Option<cli::TriggerKindArg>,
-    trigger_unit: Option<String>,
+    from_stdin: bool,
 ) -> Result<()> {
+    use revenant_core::metadata::TriggerKind;
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    let trigger = build_trigger(trigger, trigger_unit);
+    let trigger: TriggerKind = trigger.map_or(TriggerKind::Manual, Into::into);
+    let message = build_message(message, from_stdin);
 
-    let info = snapshot::create_snapshot(config, backend, toplevel, strain, message, trigger)
+    let info = snapshot::create_snapshot(config, backend, toplevel, strain, trigger, message)
         .context("failed to create snapshot")?;
 
     // Discover once, use for retention
@@ -483,14 +452,14 @@ fn cmd_restore(
     // the whole point of --save-current is a safety net, so a silent
     // proceed-without-snapshot would defeat the feature.
     let pre_restore = if save_current {
-        use revenant_core::metadata::Trigger;
+        use revenant_core::metadata::TriggerKind;
         let info = snapshot::create_snapshot(
             config,
             backend,
             toplevel,
             &snap.strain,
-            None,
-            Trigger::restore(snap.id.to_string()),
+            TriggerKind::Restore,
+            vec![format!("{}@{}", snap.strain, snap.id)],
         )
         .context("failed to create pre-restore snapshot; restore aborted")?;
         let all = snapshot::discover_snapshots(config, backend, toplevel)

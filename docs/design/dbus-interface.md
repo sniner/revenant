@@ -48,6 +48,7 @@ The trailing `1` in the names is the API version. Breaking changes ship as
 | `org.revenant.snapshot.delete`  | `auth_admin_keep`   | Cached.                                |
 | `org.revenant.config.edit`      | `auth_admin_keep`   | Cached.                                |
 | `org.revenant.restore`          | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
+| `org.revenant.cleanup`          | `auth_admin_keep`   | Purges pre-restore DELETE markers.     |
 
 The polkit policy file ships in `data/org.revenant.policy` and is installed
 to `/usr/share/polkit-1/actions/`.
@@ -154,6 +155,36 @@ operations cause the inotify watcher to fire `SnapshotsChanged`, which
 is how unprivileged subscribers learn about the change — the methods do
 not emit anything themselves.
 
+### Pre-restore states (DELETE markers)
+
+A `restore` renames the previous live subvolume(s) to `<base>-DELETE-<ts>`
+so the user has a safety net to roll back to. They are *not* snapshots
+and do not appear in `ListSnapshots`. They survive until an explicit
+cleanup — `revenantctl cleanup` from the CLI side, or the GUI via these
+methods.
+
+```text
+ListDeleteMarkers() -> (aa{sv})                 -- array of DeleteMarker
+PurgeDeleteMarkers(names: as) -> (as)           -- privileged: org.revenant.cleanup
+                                                --   returns names actually removed
+```
+
+`DeleteMarker` keys (`a{sv}`):
+
+| Key            | Type | Description                                              |
+| -------------- | ---- | -------------------------------------------------------- |
+| `name`         | `s`  | Full subvolume name, e.g. `"@-DELETE-20260411-080055"`.  |
+| `base_subvol`  | `s`  | The live subvol this was renamed from (`"@"`, `"@home"`).|
+| `id`           | `s`  | Snapshot id encoded in the marker's timestamp suffix.    |
+| `created`      | `s`  | RFC 3339 timestamp parsed from `id`. Omitted if unparseable. |
+
+Names that no longer match a live marker are silently skipped from the
+returned set — a concurrent CLI cleanup may have purged them between
+the listing and the user's confirmation.
+
+A successful purge emits `DeleteMarkersChanged`. A successful `Restore`
+also emits it (the restore creates a new marker).
+
 ### Live state
 
 ```text
@@ -207,6 +238,8 @@ SnapshotsChanged(strain: s)                     -- "" means: any/all
 StrainConfigChanged()
 LiveParentChanged()                             -- emitted after a successful restore
 DaemonStateChanged(state: s, message: s)        -- "ready", "degraded", "error"
+DeleteMarkersChanged()                          -- after a successful PurgeDeleteMarkers
+                                                --   or Restore
 ```
 
 Clients are expected to subscribe via `Match` rules (zbus does this

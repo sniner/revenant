@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::path::Path;
 
 use revenant_core::check::{Finding, Severity};
+use revenant_core::cleanup::{list_delete_markers, purge_delete_markers_by_name};
 use revenant_core::metadata::TriggerKind;
 use revenant_core::preflight::{MACHINED_RUNTIME_DIR, preflight_restore};
 use revenant_core::restore::restore_snapshot as core_restore_snapshot;
@@ -31,7 +32,8 @@ use zvariant::Value;
 use crate::config_edit;
 use crate::errors::DaemonError;
 use crate::marshal::{
-    self, Dict, StrainTuple, live_parent_to_dict, snapshot_to_dict, strain_to_tuple,
+    self, Dict, StrainTuple, delete_marker_to_dict, live_parent_to_dict, snapshot_to_dict,
+    strain_to_tuple,
 };
 use crate::polkit;
 use crate::state::DaemonState;
@@ -259,6 +261,56 @@ impl Daemon {
         Ok(())
     }
 
+    // -- Pre-restore states (DELETE markers) ---------------------------
+
+    /// Enumerate `<base>-DELETE-<ts>` subvolumes left over from earlier
+    /// restores. These are not snapshots — they're the previous live
+    /// state, renamed at restore time as the user's safety net. Unlike
+    /// snapshots they accumulate until an explicit cleanup; the GUI
+    /// surfaces them via this method.
+    async fn list_delete_markers(&self) -> Result<Vec<Dict>, DaemonError> {
+        let ready = self.state.ready().await?;
+        let markers = list_delete_markers(ready.config(), &self.state.backend, ready.toplevel())
+            .map_err(map_core_error)?;
+        markers.iter().map(delete_marker_to_dict).collect()
+    }
+
+    /// Purge a user-chosen set of `<base>-DELETE-<ts>` markers.
+    ///
+    /// Returns the names that were actually removed. Names that don't
+    /// match any current marker are silently dropped from the result —
+    /// a concurrent CLI cleanup could have purged them between the
+    /// GUI's listing and the user's confirmation, and that's fine.
+    async fn purge_delete_markers(
+        &self,
+        names: Vec<String>,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> Result<Vec<String>, DaemonError> {
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
+        polkit::check(conn, sender.as_str(), "org.revenant.cleanup").await?;
+
+        let ready = self.state.ready().await?;
+        let removed = purge_delete_markers_by_name(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &names,
+        )
+        .map_err(map_core_error)?;
+
+        if !removed.is_empty() {
+            if let Err(e) = Self::delete_markers_changed(&signal_emitter).await {
+                tracing::warn!("emit DeleteMarkersChanged after purge: {e}");
+            }
+        }
+
+        Ok(removed)
+    }
+
     // -- Live state ----------------------------------------------------
 
     async fn get_live_parent(&self) -> Result<Dict, DaemonError> {
@@ -370,6 +422,12 @@ impl Daemon {
         if let Err(e) = Self::live_parent_changed(&signal_emitter).await {
             tracing::warn!("emit LiveParentChanged after restore: {e}");
         }
+        // Restore renames the previous live subvolume(s) into a new
+        // `<base>-DELETE-<ts>` marker — the GUI's "pre-restore states"
+        // count goes up by one.
+        if let Err(e) = Self::delete_markers_changed(&signal_emitter).await {
+            tracing::warn!("emit DeleteMarkersChanged after restore: {e}");
+        }
 
         Ok(out)
     }
@@ -397,6 +455,11 @@ impl Daemon {
         ctxt: &zbus::object_server::SignalEmitter<'_>,
         state: &str,
         message: &str,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn delete_markers_changed(
+        ctxt: &zbus::object_server::SignalEmitter<'_>,
     ) -> zbus::Result<()>;
 }
 

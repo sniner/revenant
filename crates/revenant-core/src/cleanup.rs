@@ -244,6 +244,61 @@ pub fn purge_delete_pending_all(
     Ok(removed)
 }
 
+/// Purge specific `<base>-DELETE-<ts>` markers by name.
+///
+/// Used by the daemon's `PurgeDeleteMarkers` D-Bus method, where the GUI
+/// hands a user-chosen subset of markers (after a "review" dialog) to
+/// be removed.  Names that don't match any current marker are skipped
+/// with a warning — they may have been removed by a concurrent CLI
+/// `cleanup` between the GUI's listing and the user's confirmation.
+///
+/// Always recovers orphaned nested subvolumes first (same pattern as
+/// the CLI's write commands), so an interrupted-restore marker is not
+/// purged with live nested data still inside.  Per-entry deletion
+/// failures are logged and skipped; the function only fails for global
+/// problems (cannot list subvolumes, etc.).
+///
+/// Returns the names of markers that were actually removed.
+pub fn purge_delete_markers_by_name(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+    names: &[String],
+) -> Result<Vec<String>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _ = recover_orphaned_nested_subvols(config, backend, toplevel)?;
+
+    let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let markers = list_delete_markers(config, backend, toplevel)?;
+    let mut removed = Vec::new();
+
+    for marker in markers {
+        if !wanted.contains(marker.name.as_str()) {
+            continue;
+        }
+        let path = toplevel.join(&marker.name);
+        tracing::info!("purging DELETE-marked subvol '{}'", marker.name);
+        match delete_subvolume_recursive(backend, &path) {
+            Ok(()) => removed.push(marker.name),
+            Err(e) => tracing::warn!(
+                "could not delete '{}': {e} (will be retried on next run)",
+                marker.name
+            ),
+        }
+    }
+
+    let removed_set: HashSet<&str> = removed.iter().map(String::as_str).collect();
+    for name in names {
+        if !removed_set.contains(name.as_str()) {
+            tracing::warn!("DELETE marker '{name}' not found; skipping");
+        }
+    }
+
+    Ok(removed)
+}
+
 /// Delete a subvolume and any subvolumes nested inside it.
 ///
 /// Used by DELETE-marker cleanup: when a restore renames the live `@`
@@ -268,9 +323,10 @@ fn delete_subvolume_recursive(backend: &dyn FileSystemBackend, path: &Path) -> R
 /// List all `<base>-DELETE-<ts>` markers at the top level that a subsequent
 /// `purge_delete_pending_all` would remove, as structured [`DeleteMarker`]s.
 ///
-/// Used by `plan_retention` for the dry-run report.  Shares the same
-/// base-name set as `purge_delete_pending_all` / `recover_orphaned_nested_subvols`
-/// so that the three functions agree on what counts as "ours".
+/// Used by `plan_retention` for the dry-run report and by the daemon's
+/// `ListDeleteMarkers` D-Bus method.  Shares the same base-name set as
+/// `purge_delete_pending_all` / `recover_orphaned_nested_subvols` so the
+/// three functions agree on what counts as "ours".
 ///
 /// Markers whose timestamp suffix does not parse as a valid [`SnapshotId`]
 /// are dropped with a warning — they may be leftovers from a prior tool
@@ -278,7 +334,7 @@ fn delete_subvolume_recursive(backend: &dyn FileSystemBackend, path: &Path) -> R
 /// structured data would be dishonest.  A real cleanup run still picks
 /// them up because `purge_delete_pending_all` only matches the `<base>-DELETE-`
 /// prefix and does not parse the suffix.
-fn find_delete_markers(
+pub fn list_delete_markers(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
@@ -334,7 +390,7 @@ pub fn plan_retention(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<RetentionPlan> {
-    let delete_markers = find_delete_markers(config, backend, toplevel)?;
+    let delete_markers = list_delete_markers(config, backend, toplevel)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
 
     // Stable strain order — output must not depend on HashMap iteration order.

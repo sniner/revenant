@@ -98,12 +98,12 @@ pub enum Command {
         /// metadata.
         target: Option<String>,
     },
-    /// Restore a snapshot. The target is `strain@ID` (fully qualified) or a
+    /// Restore a snapshot. The argument is `strain@ID` (fully qualified) or a
     /// bare `ID` (auto-resolved across strains; ambiguous IDs error).
     Restore {
         /// `strain@ID` or bare `ID`. The bulk forms (`strain@`,
         /// `strain@all`) are rejected — restore acts on one snapshot.
-        target: String,
+        snapshot: String,
         /// Confirm the destructive restore. Without this flag, the
         /// command only prints what would happen and exits with code 1.
         #[arg(long)]
@@ -114,11 +114,11 @@ pub enum Command {
         /// itself, this overrides safety guards around the live system.
         #[arg(long)]
         force: bool,
-        /// Snapshot the current state into the target strain (as a
-        /// manual-triggered snapshot) before replacing it, so the user
-        /// has a named, retained copy to return to if the restore turns
-        /// out to be unwanted. Equivalent to running `revenantctl
-        /// snapshot <target-strain>` just before `restore`.
+        /// Snapshot the current state into the snapshot's strain (as
+        /// a manual-triggered snapshot) before replacing it, so the
+        /// user has a named, retained copy to return to if the restore
+        /// turns out to be unwanted. Equivalent to running
+        /// `revenantctl snapshot <strain>` just before `restore`.
         #[arg(long)]
         save_current: bool,
     },

@@ -160,7 +160,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             cmd_list(mode, &config, &backend, &toplevel, target.as_deref())
         }
         cli::Command::Restore {
-            target,
+            snapshot,
             yes,
             force,
             save_current,
@@ -169,7 +169,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             &config,
             &backend,
             &toplevel,
-            &target,
+            &snapshot,
             yes,
             force,
             save_current,
@@ -418,7 +418,7 @@ fn cmd_restore(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-    target_str: &str,
+    snapshot_arg: &str,
     yes: bool,
     force: bool,
     save_current: bool,
@@ -428,8 +428,8 @@ fn cmd_restore(
     // Restore acts on exactly one snapshot. Bulk targets (`strain@`,
     // `strain@all`) have no meaningful semantics here — we reject them
     // up front rather than picking a "first" or restoring N times.
-    let target: SnapshotTarget = target_str.parse().context("invalid restore target")?;
-    let (strain, id) = match target {
+    let parsed: SnapshotTarget = snapshot_arg.parse().context("invalid snapshot")?;
+    let (strain, id) = match parsed {
         SnapshotTarget::Single { strain, id } => (strain, id),
         SnapshotTarget::AllInStrain { .. } => {
             bail!("restore needs a single snapshot — `strain@` / `strain@all` is not allowed here");

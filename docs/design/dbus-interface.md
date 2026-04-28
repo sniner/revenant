@@ -90,7 +90,6 @@ Defined keys (initial set):
 | `trigger`          | `s`  | `manual` \| `pacman` \| `systemd-boot` \| `systemd-periodic` \| `restore` \| `unknown`. |
 | `message`          | `as` | Trigger-dependent list. `manual`: user note(s). `pacman`: package names. `systemd-boot`/`-periodic`: unit name. `restore`: source snapshot reference (`strain@id`). Omitted entirely if empty. |
 | `is_live_anchor`   | `b`  | True if this snapshot is the parent of the live rootfs (mirror of CLI `*` marker; matches `revenant_core::snapshot::resolve_live_parent`). |
-| `is_protected`     | `b`  | True if retention currently protects this snapshot.      |
 | `size_bytes`       | `t`  | Best-effort size; `0` if unknown.                        |
 
 ### `LiveParent` — `a{sv}`

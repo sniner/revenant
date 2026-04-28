@@ -35,7 +35,7 @@ use async_channel::{Receiver, Sender, bounded, unbounded};
 use futures_util::StreamExt;
 
 use crate::client::Client;
-use crate::model::{LiveParent, RestoreOutcome, Retention, Snapshot, Strain};
+use crate::model::{DeleteMarker, LiveParent, RestoreOutcome, Retention, Snapshot, Strain};
 use crate::proxy::{DaemonProxy, Dict};
 
 /// Events pushed from the worker to the GUI thread.
@@ -109,6 +109,15 @@ pub enum Event {
         id: String,
         result: Result<(), String>,
     },
+    /// Result of `ListDeleteMarkers` — the current set of pre-restore
+    /// states. Sent on initial fetch and after every
+    /// `DeleteMarkersChanged` signal. The header-button visibility and
+    /// the review dialog both read this.
+    DeleteMarkers(Result<Vec<DeleteMarker>, String>),
+    /// Result of a privileged `PurgeDeleteMarkers` call. Carries the
+    /// list of marker names actually removed (may be a strict subset of
+    /// the requested names if a concurrent CLI cleanup beat us to some).
+    PurgeDeleteMarkersResult(Result<Vec<String>, String>),
 }
 
 /// Commands sent from the GUI to the worker.
@@ -145,6 +154,10 @@ pub enum Command {
     /// Issue a privileged `DeleteSnapshot` call. Worker replies with
     /// `Event::DeleteSnapshotResult`.
     DeleteSnapshot { strain: String, id: String },
+    /// Purge the named DELETE markers. Worker replies with
+    /// `Event::PurgeDeleteMarkersResult`. Polkit prompt happens
+    /// inside the daemon.
+    PurgeDeleteMarkers(Vec<String>),
 }
 
 /// Worker handle returned to the GUI thread.
@@ -295,6 +308,28 @@ async fn spawn_signal_listeners(proxy: &DaemonProxy<'static>, evt_tx: Sender<Eve
         }
         Err(e) => tracing::warn!("subscribe DaemonStateChanged: {e}"),
     }
+
+    // DeleteMarkersChanged → re-fetch ListDeleteMarkers. Drives the
+    // header-button visibility and refreshes any open review dialog.
+    match proxy.receive_delete_markers_changed().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            let proxy = proxy.clone();
+            tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    let res = proxy
+                        .list_delete_markers()
+                        .await
+                        .map(|raw| raw.iter().filter_map(DeleteMarker::from_dict).collect())
+                        .map_err(|e| format!("{e}"));
+                    if evt_tx.send(Event::DeleteMarkers(res)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe DeleteMarkersChanged: {e}"),
+    }
 }
 
 async fn fetch_initial(client: &Client, evt_tx: &Sender<Event>) {
@@ -328,6 +363,18 @@ async fn fetch_initial(client: &Client, evt_tx: &Sender<Event>) {
         .map(|d| LiveParent::from_dict(&d))
         .map_err(|e| format!("{e}"));
     let _ = evt_tx.send(Event::LiveParent(live)).await;
+
+    // Pre-restore states drive the header-bar notification button.
+    // Empty list at startup is the common case; the header just hides
+    // the button. Errors fall through to a logged warning at the GUI
+    // side and the same hidden state.
+    let markers = client
+        .proxy()
+        .list_delete_markers()
+        .await
+        .map(|raw| raw.iter().filter_map(DeleteMarker::from_dict).collect())
+        .map_err(|e| format!("{e}"));
+    let _ = evt_tx.send(Event::DeleteMarkers(markers)).await;
 }
 
 async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
@@ -366,6 +413,14 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
             let _ = evt_tx
                 .send(Event::DeleteSnapshotResult { strain, id, result })
                 .await;
+        }
+        Command::PurgeDeleteMarkers(names) => {
+            let result = client
+                .proxy()
+                .purge_delete_markers(names)
+                .await
+                .map_err(|e| format!("{e}"));
+            let _ = evt_tx.send(Event::PurgeDeleteMarkersResult(result)).await;
         }
     }
 }

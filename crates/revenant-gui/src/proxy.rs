@@ -63,6 +63,12 @@ pub trait Daemon {
 
     fn restore(&self, strain: &str, id: &str, options: Dict) -> zbus::Result<Dict>;
 
+    // -- DELETE markers -----------------------------------------------
+
+    fn list_delete_markers(&self) -> zbus::Result<Vec<Dict>>;
+
+    fn purge_delete_markers(&self, names: Vec<String>) -> zbus::Result<Vec<String>>;
+
     // -- Signals -------------------------------------------------------
 
     #[zbus(signal)]
@@ -76,4 +82,7 @@ pub trait Daemon {
 
     #[zbus(signal)]
     fn daemon_state_changed(&self, state: String, message: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn delete_markers_changed(&self) -> zbus::Result<()>;
 }

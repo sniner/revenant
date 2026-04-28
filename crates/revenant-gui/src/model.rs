@@ -84,6 +84,36 @@ pub struct LiveParent {
     pub id: String,
 }
 
+/// One `<base>-DELETE-<ts>` subvolume left over from a previous
+/// restore. These are not snapshots — they're the *previous live
+/// state*, renamed at restore time as the user's safety net.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteMarker {
+    /// Full subvolume name, e.g. `"@-DELETE-20260411-080055"`.
+    pub name: String,
+    /// The live subvol this was renamed from (`"@"`, `"@home"`).
+    pub base_subvol: String,
+    /// Snapshot id encoded in the timestamp suffix.
+    pub id: String,
+    /// RFC 3339 timestamp parsed from the id; absent only when the
+    /// suffix is unparseable (legacy tooling, hand-crafted name).
+    pub created: Option<String>,
+}
+
+impl DeleteMarker {
+    pub fn from_dict(d: &Dict) -> Option<Self> {
+        let name = read_str(d, "name")?.to_string();
+        let base_subvol = read_str(d, "base_subvol")?.to_string();
+        let id = read_str(d, "id")?.to_string();
+        Some(Self {
+            name,
+            base_subvol,
+            id,
+            created: read_str(d, "created").map(str::to_owned),
+        })
+    }
+}
+
 impl Strain {
     pub fn from_tuple(t: StrainTuple) -> Self {
         let (name, subvolumes, efi, retain, display_name) = t;

@@ -28,6 +28,11 @@ RuntimeDirectory=revenant
 RuntimeDirectoryMode=0700
 # Hardening (loose first; tighten as the implementation matures).
 ProtectSystem=strict
+# /etc/revenant must be writable: SetStrainRetention edits config.toml
+# in place. Without this carve-out, ProtectSystem=strict turns the
+# whole of /etc read-only and the atomic-rename write fails with
+# EROFS.
+ReadWritePaths=/etc/revenant
 ProtectHome=read-only
 NoNewPrivileges=true
 RestrictAddressFamilies=AF_UNIX

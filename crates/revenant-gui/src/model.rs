@@ -71,6 +71,11 @@ pub struct Snapshot {
     pub created: Option<String>,
     pub trigger: String,
     pub message: Option<String>,
+    /// Human-readable summary line — trigger detail (pacman targets,
+    /// systemd unit, restore target) optionally combined with the
+    /// message. Mirrors the CLI's "Description" column minus the
+    /// leading trigger kind. `None` when there is nothing to show.
+    pub description: Option<String>,
     pub is_live_anchor: bool,
     /// True when retention currently keeps this snapshot. Drives the
     /// `Protected` pill in the detail pane.
@@ -110,6 +115,7 @@ impl Snapshot {
             created: read_str(d, "created").map(str::to_owned),
             trigger: read_str(d, "trigger").unwrap_or("unknown").to_string(),
             message: read_str(d, "message").map(str::to_owned),
+            description: read_str(d, "description").map(str::to_owned),
             is_live_anchor: read_bool(d, "is_live_anchor").unwrap_or(false),
             is_protected: read_bool(d, "is_protected").unwrap_or(false),
         })

@@ -67,6 +67,9 @@ pub fn snapshot_to_dict(
     if let Some(msg) = message {
         insert_str(&mut d, "message", msg)?;
     }
+    if let Some(desc) = snap.metadata.as_ref().and_then(description_text) {
+        insert_str(&mut d, "description", &desc)?;
+    }
 
     let is_anchor = matches!(
         live_parent,
@@ -82,6 +85,39 @@ pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {
     insert_str(&mut d, "strain", &lp.strain)?;
     insert_str(&mut d, "id", lp.id.as_str())?;
     Ok(d)
+}
+
+/// Same content as the CLI's "Description" column (`metadata_summary`)
+/// minus the leading trigger kind — the GUI shows the kind separately
+/// as "Trigger". Returns `None` when there is nothing to say (no
+/// detail and no message), so the wire dict can omit the key.
+fn description_text(meta: &SnapshotMetadata) -> Option<String> {
+    let detail = match meta.trigger.kind {
+        TriggerKind::Pacman => meta
+            .trigger
+            .pacman
+            .as_ref()
+            .map(|p| &p.targets[..])
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                if t.len() <= 3 {
+                    t.join(", ")
+                } else {
+                    format!("{}, {}, +{}", t[0], t[1], t.len() - 2)
+                }
+            }),
+        TriggerKind::SystemdBoot | TriggerKind::SystemdPeriodic => {
+            meta.trigger.systemd.as_ref().and_then(|s| s.unit.clone())
+        }
+        TriggerKind::Restore => meta.trigger.restore.as_ref().and_then(|r| r.target.clone()),
+        _ => None,
+    };
+    match (detail, meta.message.clone()) {
+        (Some(d), Some(m)) => Some(format!("{d} — {m}")),
+        (Some(d), None) => Some(d),
+        (None, Some(m)) => Some(m),
+        (None, None) => None,
+    }
 }
 
 fn trigger_and_message(meta: Option<&SnapshotMetadata>) -> (&'static str, Option<&str>) {

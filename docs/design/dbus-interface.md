@@ -89,6 +89,7 @@ Defined keys (initial set):
 | `created`          | `s`  | RFC 3339 timestamp.                                      |
 | `trigger`          | `s`  | `manual` \| `pacman` \| `systemd-boot` \| `systemd-periodic` \| `restore` \| `unknown`. |
 | `message`          | `s`  | User-supplied note (may be empty).                       |
+| `description`      | `s`  | Pre-formatted summary line (trigger detail + message), mirrors the CLI `list` Description column minus the leading trigger kind. Key omitted entirely when there is nothing to render. |
 | `is_live_anchor`   | `b`  | True if this snapshot is the parent of the live rootfs (mirror of CLI `*` marker; matches `revenant_core::snapshot::resolve_live_parent`). |
 | `is_protected`     | `b`  | True if retention currently protects this snapshot.      |
 | `size_bytes`       | `t`  | Best-effort size; `0` if unknown.                        |

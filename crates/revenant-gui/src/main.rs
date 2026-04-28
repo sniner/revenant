@@ -828,12 +828,14 @@ fn snapshot_row(
     cmd_tx: &async_channel::Sender<Command>,
 ) -> gtk::ListBoxRow {
     // Headline: ★ marker (live anchor) + date/time + spacer + buttons.
+    // CSS class "heading" gives bold body-size text — the user pushed
+    // back on title-3 (too large vs the sidebar strain titles).
     let anchor_marker = gtk::Label::builder()
         .label(if snap.is_live_anchor { "★" } else { " " })
         .css_classes(if snap.is_live_anchor {
-            vec!["accent", "title-3"]
+            vec!["accent", "heading"]
         } else {
-            vec!["title-3"]
+            vec!["heading"]
         })
         .width_chars(2)
         .build();
@@ -841,7 +843,7 @@ fn snapshot_row(
     let date = gtk::Label::builder()
         .label(format_created(snap))
         .xalign(0.0)
-        .css_classes(["title-3"])
+        .css_classes(["heading"])
         .build();
 
     let restore_btn = gtk::Button::builder()
@@ -871,15 +873,16 @@ fn snapshot_row(
 
     // K/V block. Fixed column width keeps values aligned across rows.
     // Order is invariant; absent values omit the row instead of
-    // showing an empty value.
+    // showing an empty value. Description = the daemon's pre-formatted
+    // summary (trigger detail + message) — same content as the CLI
+    // `list` Description column minus the leading trigger kind.
     let kv = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
-        .margin_top(6)
         .margin_start(28) // line up with the date (after the ★ slot)
         .build();
-    if let Some(msg) = snap.message.as_deref().filter(|s| !s.is_empty()) {
-        kv.append(&kv_pair("Description:", msg));
+    if let Some(desc) = snap.description.as_deref().filter(|s| !s.is_empty()) {
+        kv.append(&kv_pair("Description:", desc));
     }
     if !snap.trigger.is_empty() && snap.trigger != "unknown" {
         kv.append(&kv_pair("Trigger:", &snap.trigger));
@@ -887,9 +890,9 @@ fn snapshot_row(
 
     let body = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(0)
-        .margin_top(12)
-        .margin_bottom(12)
+        .spacing(2)
+        .margin_top(8)
+        .margin_bottom(8)
         .margin_start(12)
         .margin_end(12)
         .build();

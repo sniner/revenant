@@ -1278,65 +1278,7 @@ fn present_retention_dialog(
     group.add(&row_monthly);
     group.add(&row_yearly);
 
-    // Contextual footgun warning. Visible only when `last == 0` and
-    // any longer tier is active — matches the same-day-eviction edge
-    // case kept-by-design (see project memory). Re-evaluated whenever
-    // any spinner changes.
-    let warning = gtk::Label::builder()
-        .label(
-            "⚠ With Last = 0 and only longer tiers active, a same-day \
-             pre-restore snapshot can evict an older same-day pick.",
-        )
-        .wrap(true)
-        .xalign(0.0)
-        .css_classes(["caption", "warning"])
-        .margin_top(8)
-        .visible(false)
-        .build();
-
-    let extra = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .build();
-    extra.append(&group);
-    extra.append(&warning);
-    dialog.set_extra_child(Some(&extra));
-
-    // Reactive footgun visibility. Each spin row reports value
-    // changes via notify::value; clone the row handles into the
-    // closure so we can read them all on each tick. Initial state is
-    // computed once after construction.
-    {
-        // Hourly is intentionally not part of the footgun rule
-        // (same-second/hour eviction isn't the failure mode the
-        // warning is about); only daily and longer tiers matter.
-        let r_last = row_last.clone();
-        let r_daily = row_daily.clone();
-        let r_weekly = row_weekly.clone();
-        let r_monthly = row_monthly.clone();
-        let r_yearly = row_yearly.clone();
-        let warning = warning.clone();
-        let recompute = move || {
-            let trip = r_last.value() as u32 == 0
-                && (r_daily.value() as u32 > 0
-                    || r_weekly.value() as u32 > 0
-                    || r_monthly.value() as u32 > 0
-                    || r_yearly.value() as u32 > 0);
-            warning.set_visible(trip);
-        };
-        recompute();
-        for row in [
-            &row_last,
-            &row_hourly,
-            &row_daily,
-            &row_weekly,
-            &row_monthly,
-            &row_yearly,
-        ] {
-            let cb = recompute.clone();
-            row.connect_notify_local(Some("value"), move |_, _| cb());
-        }
-    }
+    dialog.set_extra_child(Some(&group));
 
     let strain_name = strain.name.clone();
     let cmd_tx = cmd_tx.clone();

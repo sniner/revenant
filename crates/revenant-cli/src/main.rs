@@ -451,6 +451,10 @@ fn cmd_restore(
     // If this step fails, we abort before touching any live subvolume —
     // the whole point of --save-current is a safety net, so a silent
     // proceed-without-snapshot would defeat the feature.
+    //
+    // Retention is intentionally NOT applied here: a restore is an
+    // exceptional operation and the source snapshot must remain
+    // available. The next regular `snapshot` run reapplies retention.
     let pre_restore = if save_current {
         use revenant_core::metadata::TriggerKind;
         let info = snapshot::create_snapshot(
@@ -462,13 +466,6 @@ fn cmd_restore(
             vec![format!("{}@{}", snap.strain, snap.id)],
         )
         .context("failed to create pre-restore snapshot; restore aborted")?;
-        let all = snapshot::discover_snapshots(config, backend, toplevel)
-            .context("failed to discover snapshots for retention")?;
-        // Retention output is discarded here — the pre-restore snapshot
-        // and the removal of older ones are both reported via the
-        // restore output struct downstream.
-        let _ = revenant_core::cleanup::apply_retention_to(config, backend, toplevel, &all)
-            .context("retention cleanup after pre-restore snapshot failed")?;
         Some(info)
     } else {
         None

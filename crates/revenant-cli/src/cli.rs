@@ -115,11 +115,12 @@ pub enum Command {
         /// itself, this overrides safety guards around the live system.
         #[arg(long)]
         force: bool,
-        /// Snapshot the current state into the snapshot's strain (as
-        /// a manual-triggered snapshot) before replacing it, so the
-        /// user has a named, retained copy to return to if the restore
-        /// turns out to be unwanted. Equivalent to running
-        /// `revenantctl snapshot <strain>` just before `restore`.
+        /// Snapshot the current state into the snapshot's strain
+        /// before replacing it, so the user has a named copy to return
+        /// to if the restore turns out to be unwanted. Retention is
+        /// intentionally skipped for this safety snapshot — the source
+        /// snapshot must remain available for the duration of the
+        /// restore. The next regular `snapshot` reapplies retention.
         #[arg(long)]
         save_current: bool,
     },

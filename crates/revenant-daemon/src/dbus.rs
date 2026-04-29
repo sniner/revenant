@@ -385,9 +385,10 @@ impl Daemon {
         let pre_restore = if save_current {
             // Mirror the CLI: --save-current creates a strain-internal
             // snapshot tagged with `TriggerKind::Restore` and the source
-            // snapshot id as the message. If this fails we abort *before*
-            // touching live subvolumes — the whole point of save_current
-            // is a safety net.
+            // snapshot id as the message. Retention is deliberately not
+            // applied — restore is an exceptional operation and the
+            // source snapshot must survive the safety snapshot.
+            // If this fails we abort *before* touching live subvolumes.
             let info = core_create_snapshot(
                 ready.config(),
                 &self.state.backend,

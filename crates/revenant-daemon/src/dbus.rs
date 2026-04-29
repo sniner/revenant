@@ -207,11 +207,16 @@ impl Daemon {
         message: Vec<String>,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<Dict, DaemonError> {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.snapshot.create").await?;
+        let action = "dev.sniner.Revenant.snapshot.create";
+        polkit::check(conn, sender.as_str(), action).await?;
+        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
+            tracing::warn!("emit OperationStarted({action}): {e}");
+        }
 
         let ready = self.state.ready().await?;
         let info = core_create_snapshot(
@@ -234,11 +239,16 @@ impl Daemon {
         id: &str,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<(), DaemonError> {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.snapshot.delete").await?;
+        let action = "dev.sniner.Revenant.snapshot.delete";
+        polkit::check(conn, sender.as_str(), action).await?;
+        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
+            tracing::warn!("emit OperationStarted({action}): {e}");
+        }
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
@@ -297,7 +307,11 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.cleanup").await?;
+        let action = "dev.sniner.Revenant.cleanup";
+        polkit::check(conn, sender.as_str(), action).await?;
+        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
+            tracing::warn!("emit OperationStarted({action}): {e}");
+        }
 
         let ready = self.state.ready().await?;
         let removed = purge_tombstones_by_name(
@@ -343,7 +357,11 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.restore").await?;
+        let action = "dev.sniner.Revenant.restore";
+        polkit::check(conn, sender.as_str(), action).await?;
+        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
+            tracing::warn!("emit OperationStarted({action}): {e}");
+        }
 
         let save_current = read_bool_opt(&options, "save_current").unwrap_or(true);
         let dry_run = read_bool_opt(&options, "dry_run").unwrap_or(false);
@@ -467,6 +485,22 @@ impl Daemon {
     #[zbus(signal)]
     pub async fn delete_markers_changed(
         ctxt: &zbus::object_server::SignalEmitter<'_>,
+    ) -> zbus::Result<()>;
+
+    /// Emitted between polkit returning OK and the daemon starting
+    /// the actual subvolume work for a privileged method
+    /// (`Restore`, `CreateSnapshot`, `DeleteSnapshot`,
+    /// `PurgeDeleteMarkers`). `operation` is the polkit action id
+    /// that was just authorised — so clients can tell which
+    /// in-flight call has progressed past the auth prompt.
+    ///
+    /// Lets the GUI swap a "waiting for authentication…" progress
+    /// toast to "<action>…" without waiting on the method response,
+    /// which only arrives once the actual work has finished.
+    #[zbus(signal)]
+    pub async fn operation_started(
+        ctxt: &zbus::object_server::SignalEmitter<'_>,
+        operation: &str,
     ) -> zbus::Result<()>;
 }
 

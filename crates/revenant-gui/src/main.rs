@@ -47,7 +47,7 @@ struct AppState {
     /// auth + actual subvol work). Held so we can dismiss it the
     /// moment the result arrives, before showing the success toast
     /// or the error toast.
-    restore_progress_toast: Option<adw::Toast>,
+    restore_progress_toast: Option<ProgressToast>,
     /// True between sending `Command::CreateSnapshot` and receiving
     /// `Event::CreateSnapshotResult`. Same purpose as
     /// `restore_in_flight` — gates the strain-header `+` button so a
@@ -56,7 +56,7 @@ struct AppState {
     create_in_flight: bool,
     /// Toast displayed while a CreateSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
-    create_progress_toast: Option<adw::Toast>,
+    create_progress_toast: Option<ProgressToast>,
     /// True between sending `Command::DeleteSnapshot` and receiving
     /// `Event::DeleteSnapshotResult`. Per-row Delete buttons read
     /// this and no-op while it's set so a second polkit prompt can't
@@ -64,7 +64,7 @@ struct AppState {
     delete_in_flight: bool,
     /// Toast displayed while a DeleteSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
-    delete_progress_toast: Option<adw::Toast>,
+    delete_progress_toast: Option<ProgressToast>,
     /// Strain to pre-select on the very first `Strains` event, sourced
     /// from the daemon's `GetLatestStrain` reply. Consumed (taken) the
     /// first time `apply_strains` runs without an existing user
@@ -80,7 +80,7 @@ struct AppState {
     /// second polkit prompt can't queue.
     purge_in_flight: bool,
     /// Toast displayed while a purge is being processed.
-    purge_progress_toast: Option<adw::Toast>,
+    purge_progress_toast: Option<ProgressToast>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
@@ -599,6 +599,9 @@ fn apply_event(
         Event::AllSnapshots(result) => {
             apply_all_snapshots(widgets, state, result);
         }
+        Event::OperationStarted => {
+            apply_operation_started(state);
+        }
         Event::PurgeTombstonesResult(result) => {
             apply_purge_tombstones_result(widgets, state, result);
         }
@@ -685,14 +688,14 @@ fn present_restore_dialog(
         }
 
         let toast = if dry_run {
-            // Dry-run is fast and never lingers in the auth phase
-            // long enough to need the title swap.
-            let t = adw::Toast::builder()
-                .title("Running preflight checks…")
-                .timeout(0)
-                .build();
-            widgets.toast_overlay.add_toast(t.clone());
-            t
+            // Dry-run is fast and not really restoring anything —
+            // pass the same label twice so the OperationStarted
+            // swap is a visual no-op.
+            show_progress_toast(
+                &widgets.toast_overlay,
+                "Running preflight checks…",
+                "Running preflight checks…",
+            )
         } else {
             show_progress_toast(
                 &widgets.toast_overlay,
@@ -1189,31 +1192,62 @@ fn apply_all_snapshots(
     refresh_strain_subtitles(widgets, state);
 }
 
-/// Build an in-flight progress toast that swaps its title from
-/// "<action> — waiting for authentication…" to "<action>…" after a
-/// short delay. The polkit prompt itself disappears as soon as the
-/// user answers it, but the daemon's actual subvolume work can still
-/// take several seconds — without the swap the toast keeps claiming
-/// to wait for authentication that already happened, which reads as
-/// "the GUI hung".
-///
-/// If the result lands before the swap fires, the toast has already
-/// been dismissed and `set_title` is a no-op.
+/// In-flight progress toast plus the label to swap to once the
+/// daemon emits `OperationStarted` (i.e. polkit has cleared the
+/// call). For toasts that need no swap (e.g. dry-run preflight),
+/// pass the same string for both labels — the swap is a visual
+/// no-op.
+#[derive(Clone)]
+struct ProgressToast {
+    toast: adw::Toast,
+    working_label: String,
+}
+
+impl ProgressToast {
+    fn dismiss(&self) {
+        self.toast.dismiss();
+    }
+}
+
+/// Build an in-flight progress toast carrying the "auth pending"
+/// label initially and the "working" label as the swap target. The
+/// daemon's `OperationStarted` signal triggers the swap from the
+/// event handler — without it the user would see
+/// "waiting for authentication" all the way through the actual
+/// subvolume work, which reads as "the GUI hung".
 fn show_progress_toast(
     overlay: &adw::ToastOverlay,
     auth_label: &str,
-    working_label: &'static str,
-) -> adw::Toast {
+    working_label: &str,
+) -> ProgressToast {
     let toast = adw::Toast::builder()
         .title(auth_label)
         .timeout(0) // 0 = do not auto-dismiss; cleared by the result handler
         .build();
     overlay.add_toast(toast.clone());
-    let toast_for_timer = toast.clone();
-    glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
-        toast_for_timer.set_title(working_label);
-    });
-    toast
+    ProgressToast {
+        toast,
+        working_label: working_label.to_string(),
+    }
+}
+
+/// Swap every active progress toast from its "auth pending" title
+/// to its "working" title. Called from the `OperationStarted`
+/// event handler — only one toast is `Some` at a time (gates), but
+/// walking all four is cheap.
+fn apply_operation_started(state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    for pt in [
+        st.restore_progress_toast.as_ref(),
+        st.create_progress_toast.as_ref(),
+        st.delete_progress_toast.as_ref(),
+        st.purge_progress_toast.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        pt.toast.set_title(&pt.working_label);
+    }
 }
 
 /// Render the snapshot's timestamp for display in the row headline.

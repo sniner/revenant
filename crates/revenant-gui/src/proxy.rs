@@ -85,4 +85,7 @@ pub trait Daemon {
 
     #[zbus(signal)]
     fn delete_markers_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn operation_started(&self, operation: String) -> zbus::Result<()>;
 }

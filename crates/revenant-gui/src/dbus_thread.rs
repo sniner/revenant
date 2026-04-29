@@ -120,6 +120,11 @@ pub enum Event {
     /// reload). The GUI groups by strain and uses the count + newest
     /// timestamp as the sidebar subtitle.
     AllSnapshots(Result<Vec<Snapshot>, String>),
+    /// Daemon emitted `OperationStarted` — polkit has resolved for
+    /// the in-flight privileged call and the daemon is now doing the
+    /// actual subvolume work. The GUI uses this to swap a
+    /// "waiting for authentication…" progress toast to "<action>…".
+    OperationStarted,
     /// Result of a privileged `PurgeDeleteMarkers` call. Carries the
     /// list of tombstone names actually removed (may be a strict
     /// subset of the requested names if a concurrent CLI cleanup beat
@@ -323,6 +328,26 @@ async fn spawn_signal_listeners(proxy: &DaemonProxy<'static>, evt_tx: Sender<Eve
             });
         }
         Err(e) => tracing::warn!("subscribe DaemonStateChanged: {e}"),
+    }
+
+    // OperationStarted → forwarded as a payload-less marker.
+    // Privileged-call progress toasts use it to swap their title
+    // from "waiting for authentication" to "working" once polkit
+    // has cleared the call but before the method response arrives.
+    // The action string in the wire payload is informational; the
+    // GUI just needs the timing edge.
+    match proxy.receive_operation_started().await {
+        Ok(mut stream) => {
+            let evt_tx = evt_tx.clone();
+            tokio::spawn(async move {
+                while stream.next().await.is_some() {
+                    if evt_tx.send(Event::OperationStarted).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => tracing::warn!("subscribe OperationStarted: {e}"),
     }
 
     // DeleteMarkersChanged → re-fetch ListDeleteMarkers. Drives the

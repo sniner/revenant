@@ -244,6 +244,17 @@ LiveParentChanged()                             -- emitted after a successful re
 DaemonStateChanged(state: s, message: s)        -- "ready", "degraded", "error"
 DeleteMarkersChanged()                          -- after a successful PurgeDeleteMarkers
                                                 --   or Restore
+OperationStarted(operation: s)                  -- emitted between polkit returning Ok
+                                                --   and the daemon starting the actual
+                                                --   subvolume work for a privileged
+                                                --   method. `operation` is the polkit
+                                                --   action id (e.g. "dev.sniner.Revenant
+                                                --   .snapshot.create"). Lets clients
+                                                --   distinguish "still waiting on the
+                                                --   user's password" from "auth done,
+                                                --   work in progress" without the
+                                                --   single method call making that
+                                                --   transition observable.
 ```
 
 Clients are expected to subscribe via `Match` rules (zbus does this

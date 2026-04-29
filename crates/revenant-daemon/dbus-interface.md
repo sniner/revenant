@@ -1,6 +1,8 @@
 # D-Bus Interface — `revenant-daemon`
 
-Status: **draft** — design document, not yet implemented.
+Status: **implemented** — wire contract for the current daemon. The "Open
+questions" and "Out of scope" sections at the bottom still describe genuine
+open items; everything in between is what `revenantd` exposes today.
 
 ## Overview
 

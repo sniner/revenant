@@ -4,39 +4,49 @@ Privileged D-Bus daemon backing `revenant-gui` (and any other unprivileged
 client that wants to talk to revenant). The CLI does **not** depend on
 this daemon — see [the design doc][design] for the rationale.
 
-[design]: ../../docs/design/dbus-interface.md
+[design]: ./dbus-interface.md
 
 The daemon owns the btrfs toplevel mount for its entire runtime
 (at `/run/revenant/toplevel`) and exposes the `dev.sniner.Revenant1`
 interface on the **system bus**. Authorization for individual methods
 is delegated to polkit. Per-call wire contract: see [the design doc][design].
 
-The daemon is functionally complete for the Phase-1 GUI:
+The daemon is functionally complete for the GUI it ships with:
 
 - **Metadata**: `GetVersion`, `GetDaemonInfo`.
 - **Strain inspection**: `ListStrains`, `GetStrain`.
 - **Snapshot read-path**: `ListSnapshots` (with optional strain
   filter), `GetSnapshot`, `GetLiveParent`.
+- **Tombstone management** (pre-restore states from earlier restores):
+  `ListDeleteMarkers`, `PurgeDeleteMarkers`.
 - **Privileged writes** (all polkit-gated):
   `SetStrainRetention` (round-trip TOML edit),
   `CreateSnapshot` (synchronous),
   `DeleteSnapshot` (synchronous),
   `Restore` (synchronous, with optional `save_current` and
   preflight findings in the result).
-- **Live updates** via inotify: `SnapshotsChanged`,
+- **Live updates** via inotify: `SnapshotsChanged(strain)`,
   `StrainConfigChanged`, `LiveParentChanged` (emitted from the
   restore path), debounced with a 200 ms trailing-edge window.
+- **Operation lifecycle**: `OperationStarted` fires after polkit
+  authorises a privileged call so clients can swap a "waiting for
+  authentication" toast for a "working…" toast, and
+  `DaemonStateChanged` announces ready/degraded transitions.
+- **Custom errors** in the `dev.sniner.Revenant.Error.*` namespace
+  (`NotAuthorized`, `NotFound`, `PreflightBlocked`, `Conflict`,
+  `BackendUnavailable`, `Internal`, …) so clients can branch on the
+  error name instead of parsing the human message.
 
-`DaemonStateChanged` is declared but not emitted yet. Hardening
-items still open are listed under [What's not here yet](#whats-not-here-yet).
+Remaining items are listed under [What's not here yet](#whats-not-here-yet).
 
 ## Status
 
-> [!WARNING]
-> Alpha. Same caveat as the rest of the project — only run this in a
-> throwaway VM. The daemon mounts the btrfs toplevel and holds it for
-> its entire lifetime; a daemon crash leaves a stale mount under
-> `/run/revenant/toplevel` (the next start self-heals it).
+> [!NOTE]
+> Beta — same caveat as the rest of the project. The daemon has been
+> exercised on multiple test systems without an incident, but it still
+> runs as root, mounts the btrfs toplevel, and writes the ESP. A daemon
+> crash leaves a stale mount under `/run/revenant/toplevel`; the next
+> start self-heals it.
 
 ## Requirements
 
@@ -292,20 +302,11 @@ sudo systemctl reload dbus.service                       # or: dbus-broker.servi
 
 ## What's not here yet
 
-- Per-strain granularity for `SnapshotsChanged` — currently the signal
-  always fires with `strain=""` (= "any"). Clients refresh the whole
-  list anyway in practice.
-- `DaemonStateChanged` is declared but never emitted; intended for
-  transitions in/out of degraded state.
-- Custom `dev.sniner.Revenant.Error.*` D-Bus errors — currently everything
-  not modelled by `fdo` goes through `org.freedesktop.DBus.Error.Failed`
-  with a human-readable message. Functional, but not ideal for clients
-  that want to branch on error kind.
 - Idle-exit timer. The daemon stays up for the lifetime of the
   process; D-Bus activation will start it on demand once that path
   is wired, and an idle timeout would let it shut itself down again.
 - D-Bus activation + a tested production install path. For now this
   is a `cargo run` daemon only; the systemd unit and bus-activation
-  files in `data/` are stubs that have not been exercised end to end.
+  files in `data/` are present but have not been exercised end to end.
 - Packaging (Make/just/xtask targets, distro packages). The bus
   policy must currently be installed by hand.

@@ -8,7 +8,7 @@
 
   Installed to: /usr/share/polkit-1/actions/dev.sniner.Revenant.policy
 
-  See: docs/design/dbus-interface.md
+  See: crates/revenant-daemon/dbus-interface.md
 -->
 <policyconfig>
   <vendor>Revenant</vendor>

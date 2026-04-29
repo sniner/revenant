@@ -12,12 +12,13 @@ codebase. End-user documentation lives in [README.md](README.md).
 
 ## Building
 
-The repository is a Cargo workspace with three crates:
+The repository is a Cargo workspace with four crates:
 
 ```
-crates/revenant-core/   # library: snapshot logic, backend trait, config
-crates/revenant-cli/    # binary `revenantctl`
-crates/revenant-gui/    # GUI stub (libadwaita; not yet implemented)
+crates/revenant-core/    # library: snapshot logic, backend trait, config
+crates/revenant-cli/     # binary `revenantctl`
+crates/revenant-daemon/  # binary `revenantd` (system-bus D-Bus service)
+crates/revenant-gui/     # binary `revenant-gui` (GTK4 + libadwaita)
 ```
 
 Standard Cargo commands work at the workspace root:
@@ -177,12 +178,15 @@ sudo unshare --mount --propagation=private \
 | `mkfs.btrfs: command not found` | btrfs userspace tools missing | Install `btrfs-progs` |
 | Tests hang | Kernel issue or stuck mount | `Ctrl-C`; the private mount namespace dies with the unshare process. If `/tmp/revenant-loopback-test` is non-empty afterwards: `sudo losetup -D && sudo rm -rf /tmp/revenant-loopback-test` |
 
-### Layer C — VM end-to-end tests (planned)
+### Layer C — VM end-to-end (manual)
 
-Not yet implemented. The intent is a small Arch Linux VM image that
-boots, runs `revenantctl init` + `snapshot` + `restore`, reboots into
-the restored state, and asserts the expected file content survived.
-Tracked as a checklist item in the README.
+There is no automated VM harness. The end-to-end shape that revenant
+targets — UEFI + systemd-boot + Btrfs root with a snapshottable
+subvolume layout — is exercised manually inside throwaway VMs that
+mirror that setup. Building such a VM by hand is faster than auditing
+a third-party script that promises to do it for you, so the recipe
+is left to the contributor; the `Testing in a VM` section of the
+[README](README.md) lists the prerequisites.
 
 ## Repository layout
 
@@ -208,7 +212,9 @@ crates/
       common/mod.rs     TestFs RAII fixture for loopback tests
       loopback.rs       Layer B integration tests (cfg(loopback-tests))
   revenant-cli/         Binary crate: revenantctl CLI
-  revenant-gui/         GUI stub (libadwaita, not yet implemented)
+  revenant-daemon/      Binary crate: revenantd D-Bus service
+                        + dbus-interface.md (wire contract)
+  revenant-gui/         Binary crate: revenant-gui GTK4 client
 tools/
   run-loopback-tests.sh Wrapper for Layer B tests
 ```

@@ -1,6 +1,6 @@
 //! Custom `dev.sniner.Revenant.Error.*` D-Bus errors.
 //!
-//! Per `docs/design/dbus-interface.md`, application-level failures go
+//! Per `crates/revenant-daemon/dbus-interface.md`, application-level failures go
 //! through one of these variants instead of `org.freedesktop.DBus
 //! .Error.Failed`. The `zbus::DBusError` derive maps each variant to a
 //! wire name in our namespace, so clients can dispatch on the error

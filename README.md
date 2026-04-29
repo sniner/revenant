@@ -1,8 +1,11 @@
 > [!WARNING]
-> **Alpha Software — Do NOT use on any system you care about.**
-> This project is in early development. It can corrupt your filesystem, destroy your bootloader
-> configuration, or leave your system unbootable. There are no stability guarantees whatsoever.
-> Test only in a throwaway VM.
+> **Beta software.** Revenant has been used daily on multiple systems (a VM, a notebook,
+> a Gnome desktop VM) over a stretch of weeks without an incident, and is no longer
+> "early development". That said, it is a tool that renames live subvolumes and rewrites
+> ESP contents — bugs at this stage can still leave a system unbootable or destroy data.
+> Treat it as beta software on a production system and **always keep an independent
+> backup**. If you would rather not take that risk, run revenant in a VM until tagged
+> releases stabilise the on-disk layout and the public APIs.
 
 # revenant
 
@@ -41,7 +44,7 @@ Timeshift or snapper, because they are not part of the respective upstream proje
 | Independent snapshot profiles with own retention | ✓ (strains) | ✗ (fixed Hourly/Daily/Weekly/Monthly/Boot) | ✓ (per-subvolume configs) |
 | Package-manager pre/post hooks (upstream) | ✓ pacman (`init --pacman`); apt/zypp planned | — | zypp (openSUSE) |
 | JSON / scriptable CLI | ✓ `--json` | ✗ | ✓ `--jsonout` |
-| Upstream GUI | stub only | GTK | — |
+| Upstream GUI | ✓ (GTK4 / libadwaita, talks to a privileged D-Bus daemon) | GTK | — |
 
 Sources: [Timeshift README](https://github.com/linuxmint/timeshift/blob/master/README.md),
 [`snapper(8)`](https://github.com/openSUSE/snapper/blob/master/doc/snapper.xml.in),
@@ -152,27 +155,75 @@ On restore, both snapshots must be present for the ID.
 - [x] Restore flow with `--yes` confirmation and DELETE-marker undo buffer
 - [x] Snapshots stored in dedicated `@snapshots` subvolume (configurable)
 - [x] Per-snapshot metadata sidecars (`--message`, trigger context, package targets)
-- [ ] VM test harness (Arch Linux)
-- [ ] GUI (`revenant-gui` crate, stub only)
-- [ ] ZFS / bcachefs backends (trait is defined, implementations pending)
+- [x] GUI (`revenant-gui`, GTK4 + libadwaita) backed by `revenant-daemon` (system-bus
+      service, polkit-gated privileged operations)
 - [x] `revenantctl init --systemd` — generates systemd units for boot and periodic snapshots
 - [x] `revenantctl check` — health checks for config, orphaned snapshots and nested subvolumes
+- [ ] ZFS / bcachefs backends (trait is defined, implementations pending)
 
 ## Architecture
 
-Revenant is a Cargo workspace with three crates:
+Revenant is a Cargo workspace with four crates:
 
 | Crate | Role |
 |---|---|
 | `revenant-core` | Library: all snapshot logic, backend trait, config, EFI sync |
 | `revenant-cli` | Binary `revenantctl`: the command-line interface |
-| `revenant-gui` | Future GUI (stub) |
+| `revenant-daemon` | Binary `revenantd`: system-bus D-Bus service, polkit-gated privileged operations |
+| `revenant-gui` | Binary `revenant-gui`: GTK4 + libadwaita desktop client, talks to the daemon over D-Bus |
+
+The CLI is standalone and does not depend on the daemon — `revenantctl` runs as root and
+talks to the backend directly. The GUI is the unprivileged client of `revenant-daemon`,
+which owns the btrfs toplevel mount and gates every write through polkit. The wire contract
+is documented in [`crates/revenant-daemon/dbus-interface.md`](crates/revenant-daemon/dbus-interface.md).
 
 The `FileSystemBackend` trait abstracts all COW filesystem operations, making it straightforward
 to add ZFS or bcachefs backends later without touching the core logic.
 
 No external binaries are required at runtime — all Btrfs operations go through ioctls directly.
 This means revenant works even in a minimal recovery environment.
+
+## Installation
+
+### From source
+
+```sh
+cargo build --release --workspace
+sudo install -Dm755 target/release/revenantctl /usr/local/bin/revenantctl
+# Optional, only if you want the GUI + privileged daemon:
+sudo install -Dm755 target/release/revenantd    /usr/local/bin/revenantd
+sudo install -Dm755 target/release/revenant-gui /usr/local/bin/revenant-gui
+```
+
+The daemon and the GUI need their D-Bus and polkit policy files in place to actually
+work; the recipe is in [`crates/revenant-daemon/README.md`](crates/revenant-daemon/README.md).
+
+### Arch Linux packages
+
+Each tagged release attaches two `*.pkg.tar.zst` files for `x86_64` to its GitHub
+release page (no aarch64 packages — for ARM systems use the static `revenantctl`
+musl binary from the same release page, or build the workspace from source).
+Download the matching version and install with `pacman -U`:
+
+```sh
+sudo pacman -U revenant-<version>-1-x86_64.pkg.tar.zst
+# Optional, depends on the revenant package:
+sudo pacman -U revenant-gui-<version>-1-x86_64.pkg.tar.zst
+```
+
+`revenant` ships the CLI (`revenantctl`); `revenant-gui` ships the privileged daemon
+(`revenantd`) plus the GTK4 client (`revenant-gui`) along with the D-Bus, polkit and
+systemd policy files.
+
+To build the same packages locally from a working tree:
+
+```sh
+cd packaging/arch
+makepkg -fi      # build, then install with pacman -U behind the scenes
+```
+
+The PKGBUILD reads `pkgver` from the workspace `Cargo.toml`, so building from any
+checkout produces a package matching that revision; no manual version edit needed.
 
 ## Usage
 
@@ -222,11 +273,10 @@ code, so a script can consistently read from stdout and branch on exit status.
 For `check` and `restore`, the exit code also encodes the outcome (non-zero on
 any error finding / on the refusal path), matching the text-mode semantics.
 
-> [!WARNING]
-> **JSON schema is not stable.**  Revenant is alpha software; field names, task
-> enum variants, and overall shapes may change without notice until a tagged
-> release.  Scripts that consume JSON output should pin to a specific
-> revenant commit.
+> [!NOTE]
+> **JSON schema is not yet stable.**  Until revenant reaches a 1.0 release,
+> field names, task enum variants, and overall shapes may still change.
+> Scripts that consume JSON output should pin to a specific revenant version.
 
 ### Quick start
 
@@ -404,6 +454,17 @@ daily = 7
 - Linux with a Btrfs root filesystem
 - Optional: EFI system partition (for EFI sync; most valuable with systemd-boot)
 - Rust 1.85+ (to build)
+
+## Testing in a VM
+
+Revenant performs btrfs subvolume operations and syncs an ESP — both are easier to
+exercise without risk inside a throwaway VM. For an end-to-end test you need a guest
+that mirrors the supported target shape: **UEFI firmware, systemd-boot, a Btrfs root
+filesystem with a snapshottable subvolume layout** (e.g. `@` / `@home` / `@snapshots`).
+Any installer that can produce that layout works; building such a VM by hand is
+faster than auditing a third-party script that promises to do it for you. Once the
+VM boots, `sudo revenantctl init` detects the layout and writes a starter config,
+and the rest of the workflow is identical to the real-system commands above.
 
 ## Disclaimer
 

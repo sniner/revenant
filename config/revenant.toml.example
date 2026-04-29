@@ -43,6 +43,9 @@ backend = "systemd-boot"
 subvolumes = ["@"]
 # Whether to sync EFI partition contents (requires sys.efi.enabled = true)
 efi = true
+# Optional human-readable label (shown by the GUI; the CLI uses the strain
+# identifier — `default` here — as-is).
+# display_name = "Manual snapshots"
 
 [strain.default.retain]
 # Tiered retention policy (all fields optional, default 0 = disabled).

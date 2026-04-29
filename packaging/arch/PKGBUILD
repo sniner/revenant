@@ -19,7 +19,12 @@
 
 pkgbase=revenant
 pkgname=(revenant revenant-gui)
-pkgver=0.1.6
+# pkgver is auto-derived from the workspace Cargo.toml by the
+# pkgver() function below — `[workspace.package].version` is the
+# single source of truth, so a version bump there propagates here
+# without a second place to remember. The literal value is just a
+# placeholder makepkg insists on before pkgver() runs.
+pkgver=0.0.0
 pkgrel=1
 arch=('x86_64')
 url='https://github.com/sniner/revenant'
@@ -30,6 +35,22 @@ makedepends=('cargo' 'rust' 'gtk4' 'libadwaita')
 options=('!lto' '!debug')
 source=()
 sha256sums=()
+
+pkgver() {
+    # Read [workspace.package].version from the workspace Cargo.toml.
+    # Per-crate manifests use `version.workspace = true`, so this is
+    # the single source of truth for the project version.
+    awk '
+        /^\[workspace\.package\]/ { in_pkg=1; next }
+        /^\[/                     { in_pkg=0 }
+        in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
+            gsub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/, "")
+            gsub(/".*$/, "")
+            print
+            exit
+        }
+    ' "$startdir/../../Cargo.toml"
+}
 
 prepare() {
     local repo="$startdir/../.."

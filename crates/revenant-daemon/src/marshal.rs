@@ -1,7 +1,7 @@
 //! Convert `revenant-core` types into D-Bus wire types.
 //!
 //! All conversions go through here so the wire format lives in one
-//! place. See `docs/design/dbus-interface.md` for the contract.
+//! place. See `crates/revenant-daemon/dbus-interface.md` for the contract.
 
 use std::collections::HashMap;
 

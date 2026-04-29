@@ -9,8 +9,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify-version:
+    # Tag-pushes only: refuse to build a release whose git tag does not
+    # match `[workspace.package].version` in the workspace Cargo.toml.
+    # Catches the common "tagged v0.2.0 but forgot to bump Cargo.toml"
+    # mistake before any build minutes are spent.
+    name: Verify tag matches workspace version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare git tag with [workspace.package].version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # Same extractor the PKGBUILD uses — keep them in lockstep.
+          ws=$(awk '
+              /^\[workspace\.package\]/ { in_pkg=1; next }
+              /^\[/                     { in_pkg=0 }
+              in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
+                  gsub(/^[[:space:]]*version[[:space:]]*=[[:space:]]*"/, "")
+                  gsub(/".*$/, "")
+                  print
+                  exit
+              }
+          ' Cargo.toml)
+          echo "Git tag (stripped):  $tag"
+          echo "Workspace version:   $ws"
+          if [ "$tag" != "$ws" ]; then
+              echo "::error::Git tag v$tag does not match [workspace.package].version $ws — bump Cargo.toml before tagging."
+              exit 1
+          fi
+          echo "OK: tag and workspace version match."
+
   build:
     name: Build ${{ matrix.target }}
+    needs: verify-version
+    # Run when the gate passed, or when it was skipped (workflow_dispatch
+    # with no tag — useful as a manual smoke build).
+    if: ${{ always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -77,10 +113,61 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  arch-package:
+    name: Build Arch packages (x86_64)
+    needs: verify-version
+    if: ${{ always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    container:
+      # base-devel ships makepkg, fakeroot, sudo, git — everything
+      # the build needs except the actual rust + gtk toolchain we
+      # install below.
+      image: archlinux:base-devel
+    steps:
+      - name: Refresh pacman databases
+        run: pacman -Sy --noconfirm
+
+      - name: Install build dependencies
+        # Pre-installing makedepends here means makepkg does not need
+        # --syncdeps (which requires sudo and would just call pacman
+        # again under a wrapper). `git` is required for actions/checkout.
+        run: pacman -S --noconfirm --needed git rust gtk4 libadwaita
+
+      - uses: actions/checkout@v4
+
+      - name: Set up build user
+        # makepkg refuses to run as root; create an unprivileged user
+        # and hand it the workspace.
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chown -R builder:builder .
+
+      - name: Build packages
+        # `-f` overwrites any leftover .pkg.tar.zst from a re-run.
+        # No `-s` because we already installed the makedepends above.
+        run: |
+          cd packaging/arch
+          sudo -u builder makepkg --noconfirm -f
+
+      - name: Stage assets
+        run: |
+          mkdir -p dist
+          cp packaging/arch/*.pkg.tar.zst dist/
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-packages-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, arch-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -103,4 +190,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            dist/revenantctl-*
+            dist/revenantctl-* dist/*.pkg.tar.zst

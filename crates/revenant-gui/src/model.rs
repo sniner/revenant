@@ -177,7 +177,7 @@ impl LiveParent {
 }
 
 /// Decoded form of the dict returned by `Restore(...)`. The wire
-/// shape is documented in `docs/design/dbus-interface.md`; here we
+/// shape is documented in `crates/revenant-daemon/dbus-interface.md`; here we
 /// keep only the bits the UI surfaces.
 #[derive(Debug, Clone)]
 pub struct RestoreOutcome {

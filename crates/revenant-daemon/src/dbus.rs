@@ -10,7 +10,7 @@
 //! 6. `Restore` (synchronous, with `save_current` + preflight +
 //!    `LiveParentChanged`).
 //!
-//! See `docs/design/dbus-interface.md` for the wire-level contract.
+//! See `crates/revenant-daemon/dbus-interface.md` for the wire-level contract.
 
 use std::sync::Arc;
 

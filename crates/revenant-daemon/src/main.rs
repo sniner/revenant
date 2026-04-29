@@ -1,6 +1,6 @@
 //! `revenantd` — privileged D-Bus daemon for revenant-gui.
 //!
-//! See `docs/design/dbus-interface.md` for the wire-level contract.
+//! See `crates/revenant-daemon/dbus-interface.md` for the wire-level contract.
 
 mod config_edit;
 mod dbus;

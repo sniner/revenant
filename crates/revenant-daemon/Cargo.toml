@@ -3,6 +3,7 @@ name = "revenant-daemon"
 description = "Privileged D-Bus daemon backing revenant-gui"
 edition.workspace = true
 version.workspace = true
+authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true

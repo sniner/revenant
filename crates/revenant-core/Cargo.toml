@@ -3,6 +3,7 @@ name = "revenant-core"
 description = "Core library for the Revenant system snapshot tool"
 edition.workspace = true
 version.workspace = true
+authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true

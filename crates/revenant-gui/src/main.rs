@@ -1556,11 +1556,6 @@ fn present_cleanup_dialog(
              removes the option to roll back to that earlier state. Once \
              removed, they are gone.",
         )
-        // Tombstone subvol names are ~28 chars (`@-DELETE-YYYYMMDD-HHMMSS-mmm`)
-        // and Adwaita's default alert-dialog content width wraps them.
-        // 480 px is enough for the longest tombstone name plus the
-        // checkbox suffix.
-        .content_width(480)
         .build();
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("purge", "Purge selected");
@@ -1571,15 +1566,22 @@ fn present_cleanup_dialog(
     // One AdwActionRow per tombstone, with a CheckButton suffix that
     // doubles as the row's activation widget — clicking anywhere on
     // the row toggles the checkbox.
+    //
+    // Title is the base subvolume (`@`, `@home`, whatever the user
+    // configured); subtitle is the tombstone's snapshot id and a
+    // human-readable date when parseable. The wire-level subvolume
+    // name (`<base>-DELETE-<id>`) is internal — composed back when
+    // the user confirms — so the user sees structured fields rather
+    // than the cryptic mash-up.
     let group = adw::PreferencesGroup::builder().build();
     let mut row_checks: Vec<(String, gtk::CheckButton)> = Vec::with_capacity(tombstones.len());
     for t in &tombstones {
-        let row = adw::ActionRow::builder().title(&t.name).build();
-        if let Some(created) = format_tombstone_created(t) {
-            row.set_subtitle(&format!("{} · from {}", t.base_subvol, created));
-        } else {
-            row.set_subtitle(&t.base_subvol);
-        }
+        let row = adw::ActionRow::builder().title(&t.base_subvol).build();
+        let subtitle = match format_tombstone_created(t) {
+            Some(date) => format!("{} · {}", t.id, date),
+            None => t.id.clone(),
+        };
+        row.set_subtitle(&subtitle);
         let check = gtk::CheckButton::builder().active(true).build();
         row.add_suffix(&check);
         row.set_activatable_widget(Some(&check));

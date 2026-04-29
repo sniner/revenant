@@ -12,13 +12,14 @@ mod model;
 mod proxy;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
 
 use crate::dbus_thread::{Command, Event, Handles};
-use crate::model::{LiveParent, Retention, Snapshot, Strain, Tombstone};
+use crate::model::{LiveParent, Retention, Snapshot, Strain, StrainStats, Tombstone};
 
 const APP_ID: &str = "dev.sniner.RevenantGui";
 
@@ -29,6 +30,11 @@ const APP_ID: &str = "dev.sniner.RevenantGui";
 struct AppState {
     strains: Vec<Strain>,
     live_parent: Option<LiveParent>,
+    /// Per-strain rollup ({count, latest_iso}) populated by
+    /// `Event::AllSnapshots`. Drives the sidebar subtitle. Read-only
+    /// for `apply_strains`; written when the cross-strain snapshot
+    /// fetch returns.
+    strain_stats: HashMap<String, StrainStats>,
     selected_strain: Option<String>,
     /// Snapshots shown in the centre pane for `selected_strain`.
     /// Indexed by `GtkListBoxRow::index()`.
@@ -357,8 +363,8 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
     let outer_split = adw::OverlaySplitView::builder()
         .sidebar(&sidebar)
         .content(&content)
-        .min_sidebar_width(220.0)
-        .max_sidebar_width(320.0)
+        .min_sidebar_width(180.0)
+        .max_sidebar_width(260.0)
         .build();
     root_stack.add_named(&outer_split, Some("main"));
 
@@ -590,6 +596,9 @@ fn apply_event(
         Event::Tombstones(result) => {
             apply_tombstones(widgets, state, result);
         }
+        Event::AllSnapshots(result) => {
+            apply_all_snapshots(widgets, state, result);
+        }
         Event::PurgeTombstonesResult(result) => {
             apply_purge_tombstones_result(widgets, state, result);
         }
@@ -756,19 +765,19 @@ fn apply_strains(
         widgets.strain_list.remove(&child);
     }
 
-    let live_strain = state
-        .borrow()
-        .live_parent
-        .as_ref()
-        .map(|lp| lp.strain.clone());
+    let (live_strain, strain_stats) = {
+        let st = state.borrow();
+        (
+            st.live_parent.as_ref().map(|lp| lp.strain.clone()),
+            st.strain_stats.clone(),
+        )
+    };
 
     for s in &strains {
         let row = adw::ActionRow::builder().title(s.title()).build();
-        // Show the technical identifier as a subtitle only when a
-        // display_name is present — otherwise the title already is
-        // the identifier and a duplicated subtitle is just noise.
-        if s.display_name.is_some() {
-            row.set_subtitle(&s.name);
+        let subtitle = format_strain_subtitle(s, strain_stats.get(&s.name));
+        if !subtitle.is_empty() {
+            row.set_subtitle(&subtitle);
         }
         if live_strain.as_deref() == Some(s.name.as_str()) {
             let pill = gtk::Label::builder()
@@ -1063,6 +1072,111 @@ fn format_message_items(items: &[String]) -> Option<String> {
         1..=3 => Some(items.join(", ")),
         _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
     }
+}
+
+/// Build the sidebar subtitle for one strain. Combines:
+///   - the technical identifier (only when display_name is set;
+///     otherwise the title already is the identifier),
+///   - the per-strain rollup ("6 ∙ 29.4." or "no snapshots yet").
+/// Joined with a thin middle dot ("∙ ") to fit the narrow sidebar.
+fn format_strain_subtitle(strain: &Strain, stats: Option<&StrainStats>) -> String {
+    let identifier = if strain.display_name.is_some() {
+        Some(strain.name.as_str())
+    } else {
+        None
+    };
+    let rollup = match stats {
+        Some(s) if s.count > 0 => {
+            let date = s
+                .latest_iso
+                .as_deref()
+                .and_then(format_short_date)
+                .unwrap_or_default();
+            if date.is_empty() {
+                format!(
+                    "{} snapshot{}",
+                    s.count,
+                    if s.count == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("{} ∙ {}", s.count, date)
+            }
+        }
+        Some(_) | None => "no snapshots yet".to_string(),
+    };
+    match identifier {
+        Some(id) => format!("{id} ∙ {rollup}"),
+        None => rollup,
+    }
+}
+
+/// Compact short-form of a snapshot timestamp for use in the
+/// sidebar subtitle ("29.4."). Prefers the locale's day-of-month +
+/// month layout via `glib::DateTime`. Returns `None` if the input
+/// is not a valid RFC 3339 string.
+fn format_short_date(rfc: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(rfc).ok()?;
+    let g = glib::DateTime::from_unix_local(parsed.timestamp()).ok()?;
+    Some(format!("{}.{}.", g.day_of_month(), g.month()))
+}
+
+/// Walk the existing strain rows and rewrite each subtitle from the
+/// current `state.strain_stats`. Cheaper than a full apply_strains
+/// — keeps row identity, selection, and the ★ suffix in place. Used
+/// when an `Event::AllSnapshots` arrives without a strain-list
+/// change.
+fn refresh_strain_subtitles(widgets: &Widgets, state: &Rc<RefCell<AppState>>) {
+    let st = state.borrow();
+    for (idx, strain) in st.strains.iter().enumerate() {
+        let Some(row) = widgets.strain_list.row_at_index(idx as i32) else {
+            continue;
+        };
+        let Some(child) = row.child() else {
+            continue;
+        };
+        let Ok(action_row) = child.downcast::<adw::ActionRow>() else {
+            continue;
+        };
+        let subtitle = format_strain_subtitle(strain, st.strain_stats.get(&strain.name));
+        action_row.set_subtitle(&subtitle);
+    }
+}
+
+/// Group the cross-strain snapshot list into per-strain stats and
+/// refresh sidebar subtitles. Wire-format errors are logged and
+/// produce empty stats — better to show "no snapshots yet" briefly
+/// than to keep stale data on screen.
+fn apply_all_snapshots(
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    result: Result<Vec<Snapshot>, String>,
+) {
+    let snaps = match result {
+        Ok(s) => s,
+        Err(reason) => {
+            tracing::warn!("ListSnapshots(filter={{}}) failed: {reason}");
+            state.borrow_mut().strain_stats.clear();
+            refresh_strain_subtitles(widgets, state);
+            return;
+        }
+    };
+
+    let mut stats: HashMap<String, StrainStats> = HashMap::new();
+    for snap in snaps {
+        let entry = stats.entry(snap.strain).or_default();
+        entry.count += 1;
+        if let Some(iso) = snap.created {
+            // RFC 3339 sorts lexicographically by time, so a string
+            // compare is fine for "newer than".
+            match &entry.latest_iso {
+                None => entry.latest_iso = Some(iso),
+                Some(prev) if iso > *prev => entry.latest_iso = Some(iso),
+                _ => {}
+            }
+        }
+    }
+    state.borrow_mut().strain_stats = stats;
+    refresh_strain_subtitles(widgets, state);
 }
 
 /// Render the snapshot's timestamp for display in the row headline.

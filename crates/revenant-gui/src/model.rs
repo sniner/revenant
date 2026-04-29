@@ -32,6 +32,19 @@ impl Strain {
     }
 }
 
+/// Per-strain rollup the sidebar shows as a subtitle.
+///
+/// Refreshed from `Event::AllSnapshots` on every `SnapshotsChanged`
+/// signal (and once at startup); we don't carry the actual snapshot
+/// list per strain — only the two stats the UI displays.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrainStats {
+    pub count: usize,
+    /// RFC 3339 of the newest snapshot in the strain. `None` if the
+    /// strain has no snapshots.
+    pub latest_iso: Option<String>,
+}
+
 /// Tiered retention policy for one strain. All tiers are unsigned
 /// counts; `0` disables a tier. Mirrors `RetainConfig` in core, but
 /// kept independent so the GUI doesn't have to depend on the core

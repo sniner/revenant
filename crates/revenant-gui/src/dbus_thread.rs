@@ -114,6 +114,12 @@ pub enum Event {
     /// `DeleteMarkersChanged` signal. The header-button visibility and
     /// the review dialog both read this.
     Tombstones(Result<Vec<Tombstone>, String>),
+    /// Flat result of `ListSnapshots(filter={})` — every snapshot of
+    /// every strain. Fired on initial fetch and on every
+    /// `SnapshotsChanged` signal (in parallel to the strain-scoped
+    /// reload). The GUI groups by strain and uses the count + newest
+    /// timestamp as the sidebar subtitle.
+    AllSnapshots(Result<Vec<Snapshot>, String>),
     /// Result of a privileged `PurgeDeleteMarkers` call. Carries the
     /// list of tombstone names actually removed (may be a strict
     /// subset of the requested names if a concurrent CLI cleanup beat
@@ -225,11 +231,16 @@ async fn run_loop(evt_tx: Sender<Event>, cmd_rx: Receiver<Command>) {
 /// rendering code paths. The `proxy` is cloned per task because
 /// zbus's signal-driven re-fetches need their own handle.
 async fn spawn_signal_listeners(proxy: &DaemonProxy<'static>, evt_tx: Sender<Event>) {
-    // SnapshotsChanged → forwarded as-is; the GUI knows which strain
-    // is currently shown.
+    // SnapshotsChanged → forwarded as-is so the GUI can decide
+    // whether to reload the active strain's list. We *also* fan out
+    // a `ListSnapshots(filter={})` here and emit AllSnapshots so the
+    // sidebar's per-strain count + last-snapshot subtitle stays in
+    // sync — without that, off-screen strains' stats would only
+    // refresh on re-selection.
     match proxy.receive_snapshots_changed().await {
         Ok(mut stream) => {
             let evt_tx = evt_tx.clone();
+            let proxy = proxy.clone();
             tokio::spawn(async move {
                 while let Some(sig) = stream.next().await {
                     let strain = sig.args().map(|a| a.strain).unwrap_or_default();
@@ -238,6 +249,10 @@ async fn spawn_signal_listeners(proxy: &DaemonProxy<'static>, evt_tx: Sender<Eve
                         .await
                         .is_err()
                     {
+                        break;
+                    }
+                    let all = list_all_snapshots(&proxy).await;
+                    if evt_tx.send(Event::AllSnapshots(all)).await.is_err() {
                         break;
                     }
                 }
@@ -376,6 +391,20 @@ async fn fetch_initial(client: &Client, evt_tx: &Sender<Event>) {
         .map(|raw| raw.iter().filter_map(Tombstone::from_dict).collect())
         .map_err(|e| format!("{e}"));
     let _ = evt_tx.send(Event::Tombstones(tombstones)).await;
+
+    // One initial cross-strain snapshot fetch so the sidebar's
+    // count/last-date subtitles are populated before the user
+    // touches anything. Subsequent refreshes are signal-driven.
+    let all = list_all_snapshots(client.proxy()).await;
+    let _ = evt_tx.send(Event::AllSnapshots(all)).await;
+}
+
+async fn list_all_snapshots(proxy: &DaemonProxy<'_>) -> Result<Vec<Snapshot>, String> {
+    let raw = proxy
+        .list_snapshots(HashMap::new())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(raw.iter().filter_map(Snapshot::from_dict).collect())
 }
 
 async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {

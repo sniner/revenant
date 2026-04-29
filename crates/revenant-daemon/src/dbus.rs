@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::path::Path;
 
 use revenant_core::check::{Finding, Severity};
-use revenant_core::cleanup::{list_delete_markers, purge_delete_markers_by_name};
+use revenant_core::cleanup::{list_tombstones, purge_tombstones_by_name};
 use revenant_core::metadata::TriggerKind;
 use revenant_core::preflight::{MACHINED_RUNTIME_DIR, preflight_restore};
 use revenant_core::restore::restore_snapshot as core_restore_snapshot;
@@ -32,8 +32,8 @@ use zvariant::Value;
 use crate::config_edit;
 use crate::errors::DaemonError;
 use crate::marshal::{
-    self, Dict, StrainTuple, delete_marker_to_dict, live_parent_to_dict, snapshot_to_dict,
-    strain_to_tuple,
+    self, Dict, StrainTuple, live_parent_to_dict, snapshot_to_dict, strain_to_tuple,
+    tombstone_to_dict,
 };
 use crate::polkit;
 use crate::state::DaemonState;
@@ -261,26 +261,32 @@ impl Daemon {
         Ok(())
     }
 
-    // -- Pre-restore states (DELETE markers) ---------------------------
+    // -- Pre-restore states (tombstones) -------------------------------
+    //
+    // External D-Bus API: ListDeleteMarkers / PurgeDeleteMarkers /
+    // DeleteMarkersChanged. The Rust method names here mirror the wire
+    // contract; internally we use "tombstone" terminology because it's
+    // a more precise word for these renamed pre-restore subvolumes.
 
-    /// Enumerate `<base>-DELETE-<ts>` subvolumes left over from earlier
-    /// restores. These are not snapshots — they're the previous live
-    /// state, renamed at restore time as the user's safety net. Unlike
-    /// snapshots they accumulate until an explicit cleanup; the GUI
-    /// surfaces them via this method.
+    /// Enumerate `<base>-DELETE-<ts>` subvolumes (tombstones) left over
+    /// from earlier restores. These are not snapshots — they're the
+    /// previous live state, renamed at restore time as the user's
+    /// safety net. Unlike snapshots they accumulate until an explicit
+    /// cleanup; the GUI surfaces them via this method.
     async fn list_delete_markers(&self) -> Result<Vec<Dict>, DaemonError> {
         let ready = self.state.ready().await?;
-        let markers = list_delete_markers(ready.config(), &self.state.backend, ready.toplevel())
+        let tombstones = list_tombstones(ready.config(), &self.state.backend, ready.toplevel())
             .map_err(map_core_error)?;
-        markers.iter().map(delete_marker_to_dict).collect()
+        tombstones.iter().map(tombstone_to_dict).collect()
     }
 
-    /// Purge a user-chosen set of `<base>-DELETE-<ts>` markers.
+    /// Purge a user-chosen set of tombstones.
     ///
     /// Returns the names that were actually removed. Names that don't
-    /// match any current marker are silently dropped from the result —
-    /// a concurrent CLI cleanup could have purged them between the
-    /// GUI's listing and the user's confirmation, and that's fine.
+    /// match any current tombstone are silently dropped from the
+    /// result — a concurrent CLI cleanup could have purged them
+    /// between the GUI's listing and the user's confirmation, and
+    /// that's fine.
     async fn purge_delete_markers(
         &self,
         names: Vec<String>,
@@ -294,7 +300,7 @@ impl Daemon {
         polkit::check(conn, sender.as_str(), "org.revenant.cleanup").await?;
 
         let ready = self.state.ready().await?;
-        let removed = purge_delete_markers_by_name(
+        let removed = purge_tombstones_by_name(
             ready.config(),
             &self.state.backend,
             ready.toplevel(),

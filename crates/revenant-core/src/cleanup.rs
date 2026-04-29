@@ -19,23 +19,30 @@ use crate::snapshot::{self, SnapshotId, SnapshotInfo};
 pub struct RetentionPlan {
     /// One entry per configured strain, sorted by strain name for stable output.
     pub strains: Vec<StrainPlan>,
-    /// Structured view of any `<base>-DELETE-<ts>` markers that a real
-    /// cleanup run would purge.  May be empty.
-    pub delete_markers: Vec<DeleteMarker>,
+    /// Structured view of any tombstones (`<base>-DELETE-<ts>` subvols)
+    /// that a real cleanup run would purge.  May be empty.
+    #[serde(rename = "delete_markers")]
+    pub tombstones: Vec<Tombstone>,
 }
 
-/// A parsed `<base>-DELETE-<ts>` marker.
+/// A tombstone — a parsed `<base>-DELETE-<ts>` subvolume.
 ///
-/// Markers are the renamed pre-restore live subvolumes — they survive
-/// until an explicit `revenantctl cleanup` (or a subsequent restore)
-/// removes them.  A dry-run plan carries them as a structured value
-/// rather than a raw subvolume name so JSON consumers don't have to
-/// parse the `base-DELETE-timestamp` convention themselves.
+/// Tombstones are the renamed pre-restore live subvolumes; they survive
+/// a restore as the user's "previous state", until an explicit
+/// `revenantctl cleanup` (or a subsequent restore) removes them.  A
+/// dry-run plan carries them as a structured value rather than a raw
+/// subvolume name so JSON consumers don't have to parse the
+/// `base-DELETE-timestamp` convention themselves.
+///
+/// Externally (CLI strings, D-Bus method names, polkit actions) we keep
+/// the term "delete marker" / "DELETE" — `Tombstone` is purely the
+/// internal Rust name because "delete" is too generic for this very
+/// specific concept.
 #[derive(Debug, Clone, Serialize)]
-pub struct DeleteMarker {
-    /// The live subvol this marker was renamed from, e.g. `"@"`.
+pub struct Tombstone {
+    /// The live subvol this tombstone was renamed from, e.g. `"@"`.
     pub base_subvol: String,
-    /// Timestamp the marker was created (at the moment of the restore).
+    /// Timestamp the tombstone was created (at the moment of the restore).
     pub id: SnapshotId,
     /// Full subvolume name, e.g. `"@-DELETE-20260411-080055"`.
     pub name: String,
@@ -70,19 +77,19 @@ pub enum PlanAction {
 }
 
 /// Try to rescue nested subvolumes that ended up stranded inside a
-/// `<base>-DELETE-<ts>` marker — typically because a previous `restore`
-/// was interrupted between the rename of the live subvolume and the
-/// nested-subvolume re-attach step (e.g. power loss after the rename
-/// but before the loop that moves the nested subvols into the freshly
-/// restored subvolume completed).
+/// tombstone — typically because a previous `restore` was interrupted
+/// between the rename of the live subvolume and the nested-subvolume
+/// re-attach step (e.g. power loss after the rename but before the
+/// loop that moves the nested subvols into the freshly restored
+/// subvolume completed).
 ///
-/// For each marker that contains nested subvolumes, attempt to move
+/// For each tombstone that contains nested subvolumes, attempt to move
 /// those nested subvolumes back into the corresponding live `<base>`
 /// subvolume at their original relative paths.  Per-entry failures
 /// (live subvol missing, destination already exists as a subvolume,
-/// rename failed) are logged as warnings — the marker is left in place
-/// so the user or a later run can investigate, and the function never
-/// errors out so the surrounding write command can still proceed.
+/// rename failed) are logged as warnings — the tombstone is left in
+/// place so the user or a later run can investigate, and the function
+/// never errors out so the surrounding write command can still proceed.
 ///
 /// Designed to be called at the start of every CLI command that
 /// modifies on-disk state.  Read-only commands (`list`, `status`,
@@ -96,7 +103,7 @@ pub fn recover_orphaned_nested_subvols(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<usize> {
-    // Same base-name set as `purge_delete_pending_all`: only markers
+    // Same base-name set as `purge_all_tombstones`: only tombstones
     // whose prefix matches a known strain subvol (or the EFI staging
     // subvol) are considered ours to touch.
     let mut base_names: HashSet<&str> = HashSet::new();
@@ -116,8 +123,8 @@ pub fn recover_orphaned_nested_subvols(
         let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Find which base this marker belongs to.  We need the base
-        // name to figure out which live subvol the orphans should
+        // Find which base this tombstone belongs to.  We need the
+        // base name to figure out which live subvol the orphans should
         // move back into.
         let Some(base) = base_names
             .iter()
@@ -142,7 +149,7 @@ pub fn recover_orphaned_nested_subvols(
         let live_path = toplevel.join(base);
         if !subvol_exists(backend, &live_path) {
             tracing::warn!(
-                "DELETE marker {} contains {} nested subvolume(s) but live subvol {} does not exist; leaving marker in place for manual review",
+                "tombstone {} contains {} nested subvolume(s) but live subvol {} does not exist; leaving tombstone in place for manual review",
                 name,
                 nested.len(),
                 live_path.display()
@@ -158,7 +165,7 @@ pub fn recover_orphaned_nested_subvols(
 
             if subvol_exists(backend, &to) {
                 tracing::warn!(
-                    "skipping recovery of {} → {}: destination already exists as a subvolume; leaving in DELETE marker for manual review",
+                    "skipping recovery of {} → {}: destination already exists as a subvolume; leaving in tombstone for manual review",
                     nested_path.display(),
                     to.display()
                 );
@@ -196,16 +203,17 @@ pub fn recover_orphaned_nested_subvols(
     Ok(recovered)
 }
 
-/// Delete all subvolumes carrying the DELETE marker across all configured subvol names.
+/// Delete all tombstones (`<base>-DELETE-<ts>` subvols) across all
+/// configured subvol names.
 ///
 /// Called automatically by `apply_retention` (i.e. `revenantctl cleanup`).
-/// `create_snapshot` deliberately does *not* call this any more: DELETE
-/// markers are the volatile undo buffer for the previous live state after
-/// a restore, and purging them on every boot-time snapshot would defeat
-/// that purpose.  Failures per entry are logged as warnings; the function
-/// always succeeds so that a mounted subvolume (live root before reboot)
-/// does not block normal operation.
-pub fn purge_delete_pending_all(
+/// `create_snapshot` deliberately does *not* call this any more:
+/// tombstones are the volatile undo buffer for the previous live state
+/// after a restore, and purging them on every boot-time snapshot would
+/// defeat that purpose.  Failures per entry are logged as warnings; the
+/// function always succeeds so that a mounted subvolume (live root
+/// before reboot) does not block normal operation.
+pub fn purge_all_tombstones(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
@@ -230,7 +238,7 @@ pub fn purge_delete_pending_all(
                 .iter()
                 .any(|base| name.starts_with(&format!("{base}-{DELETE_STRAIN}-")));
             if matched {
-                tracing::info!("cleanup: purging DELETE-marked subvol '{name}'");
+                tracing::info!("cleanup: purging tombstone '{name}'");
                 match delete_subvolume_recursive(backend, &entry.path) {
                     Ok(()) => removed.push(name.to_string()),
                     Err(e) => tracing::warn!(
@@ -244,22 +252,22 @@ pub fn purge_delete_pending_all(
     Ok(removed)
 }
 
-/// Purge specific `<base>-DELETE-<ts>` markers by name.
+/// Purge specific tombstones by subvolume name.
 ///
 /// Used by the daemon's `PurgeDeleteMarkers` D-Bus method, where the GUI
-/// hands a user-chosen subset of markers (after a "review" dialog) to
-/// be removed.  Names that don't match any current marker are skipped
-/// with a warning — they may have been removed by a concurrent CLI
-/// `cleanup` between the GUI's listing and the user's confirmation.
+/// hands a user-chosen subset of tombstones (after a "review" dialog)
+/// to be removed.  Names that don't match any current tombstone are
+/// skipped with a warning — they may have been removed by a concurrent
+/// CLI `cleanup` between the GUI's listing and the user's confirmation.
 ///
 /// Always recovers orphaned nested subvolumes first (same pattern as
-/// the CLI's write commands), so an interrupted-restore marker is not
-/// purged with live nested data still inside.  Per-entry deletion
+/// the CLI's write commands), so an interrupted-restore tombstone is
+/// not purged with live nested data still inside.  Per-entry deletion
 /// failures are logged and skipped; the function only fails for global
 /// problems (cannot list subvolumes, etc.).
 ///
-/// Returns the names of markers that were actually removed.
-pub fn purge_delete_markers_by_name(
+/// Returns the names of tombstones that were actually removed.
+pub fn purge_tombstones_by_name(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
@@ -271,20 +279,20 @@ pub fn purge_delete_markers_by_name(
     let _ = recover_orphaned_nested_subvols(config, backend, toplevel)?;
 
     let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
-    let markers = list_delete_markers(config, backend, toplevel)?;
+    let tombstones = list_tombstones(config, backend, toplevel)?;
     let mut removed = Vec::new();
 
-    for marker in markers {
-        if !wanted.contains(marker.name.as_str()) {
+    for tombstone in tombstones {
+        if !wanted.contains(tombstone.name.as_str()) {
             continue;
         }
-        let path = toplevel.join(&marker.name);
-        tracing::info!("purging DELETE-marked subvol '{}'", marker.name);
+        let path = toplevel.join(&tombstone.name);
+        tracing::info!("purging tombstone '{}'", tombstone.name);
         match delete_subvolume_recursive(backend, &path) {
-            Ok(()) => removed.push(marker.name),
+            Ok(()) => removed.push(tombstone.name),
             Err(e) => tracing::warn!(
                 "could not delete '{}': {e} (will be retried on next run)",
-                marker.name
+                tombstone.name
             ),
         }
     }
@@ -292,7 +300,7 @@ pub fn purge_delete_markers_by_name(
     let removed_set: HashSet<&str> = removed.iter().map(String::as_str).collect();
     for name in names {
         if !removed_set.contains(name.as_str()) {
-            tracing::warn!("DELETE marker '{name}' not found; skipping");
+            tracing::warn!("tombstone '{name}' not found; skipping");
         }
     }
 
@@ -301,14 +309,14 @@ pub fn purge_delete_markers_by_name(
 
 /// Delete a subvolume and any subvolumes nested inside it.
 ///
-/// Used by DELETE-marker cleanup: when a restore renames the live `@`
+/// Used by tombstone cleanup: when a restore renames the live `@`
 /// subvolume to `@-DELETE-{ts}`, any nested subvolumes that lived inside
 /// the original `@` (e.g. `@/var/lib/portables` on a stock Arch install)
 /// move along with it. btrfs `SNAP_DESTROY` refuses to delete a subvolume
 /// that still contains nested subvolumes (ENOTEMPTY), so we have to walk
-/// the marker depth-first and clear it from the inside out.
+/// the tombstone depth-first and clear it from the inside out.
 ///
-/// This is intentionally only invoked for DELETE markers — never for live
+/// This is intentionally only invoked for tombstones — never for live
 /// subvolumes or snapshots, where dropping nested data would be a
 /// destructive surprise. The `check` command warns about nested
 /// subvolumes precisely because rollback discards them; this function is
@@ -320,25 +328,25 @@ fn delete_subvolume_recursive(backend: &dyn FileSystemBackend, path: &Path) -> R
     backend.delete_subvolume(path)
 }
 
-/// List all `<base>-DELETE-<ts>` markers at the top level that a subsequent
-/// `purge_delete_pending_all` would remove, as structured [`DeleteMarker`]s.
+/// List all tombstones at the top level that a subsequent
+/// `purge_all_tombstones` would remove, as structured [`Tombstone`]s.
 ///
 /// Used by `plan_retention` for the dry-run report and by the daemon's
 /// `ListDeleteMarkers` D-Bus method.  Shares the same base-name set as
-/// `purge_delete_pending_all` / `recover_orphaned_nested_subvols` so the
+/// `purge_all_tombstones` / `recover_orphaned_nested_subvols` so the
 /// three functions agree on what counts as "ours".
 ///
-/// Markers whose timestamp suffix does not parse as a valid [`SnapshotId`]
-/// are dropped with a warning — they may be leftovers from a prior tool
-/// version or a hand-crafted name, and presenting them as numbered
-/// structured data would be dishonest.  A real cleanup run still picks
-/// them up because `purge_delete_pending_all` only matches the `<base>-DELETE-`
-/// prefix and does not parse the suffix.
-pub fn list_delete_markers(
+/// Tombstones whose timestamp suffix does not parse as a valid
+/// [`SnapshotId`] are dropped with a warning — they may be leftovers
+/// from a prior tool version or a hand-crafted name, and presenting
+/// them as numbered structured data would be dishonest.  A real cleanup
+/// run still picks them up because `purge_all_tombstones` only matches
+/// the `<base>-DELETE-` prefix and does not parse the suffix.
+pub fn list_tombstones(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
-) -> Result<Vec<DeleteMarker>> {
+) -> Result<Vec<Tombstone>> {
     let mut base_names: HashSet<&str> = HashSet::new();
     for strain_config in config.strain.values() {
         for sv in &strain_config.subvolumes {
@@ -350,7 +358,7 @@ pub fn list_delete_markers(
     }
 
     let all_subvols = backend.list_subvolumes(toplevel)?;
-    let mut markers = Vec::new();
+    let mut tombstones = Vec::new();
     for entry in all_subvols {
         let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -362,27 +370,27 @@ pub fn list_delete_markers(
             continue;
         };
         match SnapshotId::from_string(suffix) {
-            Ok(id) => markers.push(DeleteMarker {
+            Ok(id) => tombstones.push(Tombstone {
                 base_subvol: base.to_string(),
                 id,
                 name: name.to_string(),
             }),
             Err(_) => {
                 tracing::warn!(
-                    "skipping DELETE marker '{name}' in dry-run report: timestamp suffix '{suffix}' is not a valid snapshot ID"
+                    "skipping tombstone '{name}' in dry-run report: timestamp suffix '{suffix}' is not a valid snapshot ID"
                 );
             }
         }
     }
-    markers.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(markers)
+    tombstones.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tombstones)
 }
 
 /// Compute — without modifying anything on disk — what `apply_retention`
 /// would do.  Returns a [`RetentionPlan`] that enumerates every snapshot
 /// per configured strain with a keep/delete decision (plus the reasons
-/// protecting a kept snapshot) and lists any DELETE markers that would
-/// be purged.
+/// protecting a kept snapshot) and lists any tombstones that would be
+/// purged.
 ///
 /// This is the engine behind `revenantctl cleanup --dry-run`.
 pub fn plan_retention(
@@ -390,7 +398,7 @@ pub fn plan_retention(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<RetentionPlan> {
-    let delete_markers = list_delete_markers(config, backend, toplevel)?;
+    let tombstones = list_tombstones(config, backend, toplevel)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
 
     // Stable strain order — output must not depend on HashMap iteration order.
@@ -433,7 +441,7 @@ pub fn plan_retention(
 
     Ok(RetentionPlan {
         strains,
-        delete_markers,
+        tombstones,
     })
 }
 
@@ -471,11 +479,11 @@ pub fn purge_orphaned_sidecars(
 }
 
 /// Combined result of a live `cleanup` run. Separates subvolume removals
-/// (retention drops + purged DELETE markers) from orphaned sidecar file
+/// (retention drops + purged tombstones) from orphaned sidecar file
 /// removals so the UI can report each category individually.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CleanupSummary {
-    /// Snapshot IDs and DELETE marker names that were removed.
+    /// Snapshot IDs and tombstone subvolume names that were removed.
     pub removed: Vec<String>,
     /// Filenames of orphaned sidecar metadata files that were removed.
     pub removed_sidecars: Vec<String>,
@@ -483,15 +491,15 @@ pub struct CleanupSummary {
 
 /// Apply per-strain retention policy: keep only the most recent `retain` snapshots per strain.
 ///
-/// Also purges any DELETE-marked subvolumes left over from previous restores
-/// and any orphaned sidecar metadata files. Discovers snapshots on disk,
-/// then delegates to `apply_retention_to`.
+/// Also purges any tombstones left over from previous restores and any
+/// orphaned sidecar metadata files. Discovers snapshots on disk, then
+/// delegates to `apply_retention_to`.
 pub fn apply_retention(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<CleanupSummary> {
-    let mut removed = purge_delete_pending_all(config, backend, toplevel)?;
+    let mut removed = purge_all_tombstones(config, backend, toplevel)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
     removed.extend(apply_retention_to(
         config,
@@ -723,12 +731,12 @@ last = 1
     }
 
     #[test]
-    fn retention_purges_delete_markers() {
+    fn retention_purges_tombstones() {
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
 
-        // Pre-existing DELETE marker (e.g. left over from a prior restore).
+        // Pre-existing tombstone (e.g. left over from a prior restore).
         mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000"));
 
         let summary = apply_retention(&config, &mock, toplevel).unwrap();
@@ -825,8 +833,8 @@ last = 1
         assert!(matches!(periodic.entries[1].action, PlanAction::Delete));
         assert!(matches!(periodic.entries[2].action, PlanAction::Delete));
 
-        // No DELETE markers in this scenario.
-        assert!(plan.delete_markers.is_empty());
+        // No tombstones in this scenario.
+        assert!(plan.tombstones.is_empty());
     }
 
     #[test]
@@ -845,7 +853,7 @@ last = 1
     }
 
     #[test]
-    fn plan_reports_delete_markers() {
+    fn plan_reports_tombstones() {
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -855,22 +863,22 @@ last = 1
         mock.seed_subvolume(toplevel.join("@home-DELETE-20260101-120000"));
 
         let plan = plan_retention(&config, &mock, toplevel).unwrap();
-        assert_eq!(plan.delete_markers.len(), 1);
-        let marker = &plan.delete_markers[0];
-        assert_eq!(marker.name, "@-DELETE-20260101-120000");
-        assert_eq!(marker.base_subvol, "@");
-        assert_eq!(marker.id.as_str(), "20260101-120000");
-        // Dry run: marker still present on disk.
+        assert_eq!(plan.tombstones.len(), 1);
+        let tombstone = &plan.tombstones[0];
+        assert_eq!(tombstone.name, "@-DELETE-20260101-120000");
+        assert_eq!(tombstone.base_subvol, "@");
+        assert_eq!(tombstone.id.as_str(), "20260101-120000");
+        // Dry run: tombstone still present on disk.
         assert!(mock.contains("/top/@-DELETE-20260101-120000"));
     }
 
     #[test]
-    fn plan_drops_unparsable_delete_markers() {
+    fn plan_drops_unparsable_tombstones() {
         // A `<base>-DELETE-<garbage>` name where <garbage> is not a
         // valid snapshot ID must be excluded from the dry-run report —
         // we don't have a trustworthy timestamp for JSON consumers.
-        // (purge_delete_pending_all would still remove it, since it
-        // only matches the `<base>-DELETE-` prefix.)
+        // (purge_all_tombstones would still remove it, since it only
+        // matches the `<base>-DELETE-` prefix.)
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -880,11 +888,11 @@ last = 1
 
         let plan = plan_retention(&config, &mock, toplevel).unwrap();
         // Only the well-formed one shows up.
-        assert_eq!(plan.delete_markers.len(), 1);
-        assert_eq!(plan.delete_markers[0].name, "@-DELETE-20260101-120000");
+        assert_eq!(plan.tombstones.len(), 1);
+        assert_eq!(plan.tombstones[0].name, "@-DELETE-20260101-120000");
     }
 
-    // ----- purge_delete_pending_all -----
+    // ----- purge_all_tombstones -----
 
     #[test]
     fn purge_skips_unrelated_subvols() {
@@ -893,11 +901,11 @@ last = 1
         let mock = setup_mock(&config, toplevel);
 
         // Three things in toplevel that look superficially similar:
-        mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000")); // real marker
+        mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000")); // real tombstone
         mock.seed_subvolume(toplevel.join("@home-DELETE-20260101-120000")); // unknown base, ignored
-        mock.seed_subvolume(toplevel.join("@-default-20260102-120000")); // not a DELETE marker
+        mock.seed_subvolume(toplevel.join("@-default-20260102-120000")); // not a tombstone
 
-        let removed = purge_delete_pending_all(&config, &mock, toplevel).unwrap();
+        let removed = purge_all_tombstones(&config, &mock, toplevel).unwrap();
         assert_eq!(removed, vec!["@-DELETE-20260101-120000".to_string()]);
         assert!(!mock.contains("/top/@-DELETE-20260101-120000"));
         // Other entries untouched
@@ -906,33 +914,33 @@ last = 1
     }
 
     #[test]
-    fn purge_recurses_into_delete_marker_with_nested_subvols() {
+    fn purge_recurses_into_tombstone_with_nested_subvols() {
         // Regression: a restore renames the live `@` to `@-DELETE-{ts}`,
         // which carries any nested subvolumes (e.g. var/lib/portables on
         // Arch) along with it. btrfs SNAP_DESTROY refuses to delete a
         // subvolume that still contains nested ones (ENOTEMPTY), so the
-        // marker would otherwise stay around forever.
+        // tombstone would otherwise stay around forever.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
 
-        // The DELETE marker plus two nested subvols inside it (the
-        // mock's delete_subvolume mirrors the real ENOTEMPTY behaviour,
-        // so this test would fail without the recursive cleanup).
-        let marker = toplevel.join("@-DELETE-20260101-120000");
-        mock.seed_subvolume(marker.clone());
-        mock.seed_subvolume(marker.join("var/lib/portables"));
-        mock.seed_subvolume(marker.join("var/lib/machines"));
+        // The tombstone plus two nested subvols inside it (the mock's
+        // delete_subvolume mirrors the real ENOTEMPTY behaviour, so
+        // this test would fail without the recursive cleanup).
+        let tombstone = toplevel.join("@-DELETE-20260101-120000");
+        mock.seed_subvolume(tombstone.clone());
+        mock.seed_subvolume(tombstone.join("var/lib/portables"));
+        mock.seed_subvolume(tombstone.join("var/lib/machines"));
 
-        let removed = purge_delete_pending_all(&config, &mock, toplevel).unwrap();
+        let removed = purge_all_tombstones(&config, &mock, toplevel).unwrap();
         assert_eq!(removed, vec!["@-DELETE-20260101-120000".to_string()]);
-        assert!(!mock.contains(&marker));
-        assert!(!mock.contains(marker.join("var/lib/portables")));
-        assert!(!mock.contains(marker.join("var/lib/machines")));
+        assert!(!mock.contains(&tombstone));
+        assert!(!mock.contains(tombstone.join("var/lib/portables")));
+        assert!(!mock.contains(tombstone.join("var/lib/machines")));
     }
 
     #[test]
-    fn purge_handles_multiple_markers() {
+    fn purge_handles_multiple_tombstones() {
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -941,7 +949,7 @@ last = 1
         mock.seed_subvolume(toplevel.join("@-DELETE-20260102-120000"));
         mock.seed_subvolume(toplevel.join("@-DELETE-20260103-120000"));
 
-        let removed = purge_delete_pending_all(&config, &mock, toplevel).unwrap();
+        let removed = purge_all_tombstones(&config, &mock, toplevel).unwrap();
         assert_eq!(removed.len(), 3);
         for ts in &["20260101-120000", "20260102-120000", "20260103-120000"] {
             assert!(!mock.contains(format!("/top/@-DELETE-{ts}")));
@@ -954,30 +962,30 @@ last = 1
     fn recover_moves_nested_back_into_live_subvol() {
         // Simulates a crash between the rename of the live @ and the
         // re-attach loop in restore_snapshot: there's a fresh @ (the
-        // restored one) plus a @-DELETE-{ts} carrying a nested subvol
-        // that never got moved back.  The recovery hook should put it
-        // back into @ at the same relative path.
+        // restored one) plus a @-DELETE-{ts} tombstone carrying a
+        // nested subvol that never got moved back.  The recovery hook
+        // should put it back into @ at the same relative path.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
 
-        let marker = toplevel.join("@-DELETE-20260101-120000");
-        mock.seed_subvolume(marker.clone());
-        mock.seed_subvolume(marker.join("var/lib/portables"));
+        let tombstone = toplevel.join("@-DELETE-20260101-120000");
+        mock.seed_subvolume(tombstone.clone());
+        mock.seed_subvolume(tombstone.join("var/lib/portables"));
 
         let recovered = recover_orphaned_nested_subvols(&config, &mock, toplevel).unwrap();
         assert_eq!(recovered, 1);
         assert!(mock.contains("/top/@/var/lib/portables"));
-        assert!(!mock.contains(marker.join("var/lib/portables")));
-        // Marker itself stays — purge handles its removal once it's
-        // empty of nested subvols.
-        assert!(mock.contains(&marker));
+        assert!(!mock.contains(tombstone.join("var/lib/portables")));
+        // Tombstone itself stays — purge handles its removal once
+        // it's empty of nested subvols.
+        assert!(mock.contains(&tombstone));
     }
 
     #[test]
-    fn recover_skips_marker_without_nested() {
-        // The normal post-restore state: the marker is empty of nested
-        // subvols.  Recovery should be a no-op.
+    fn recover_skips_tombstone_without_nested() {
+        // The normal post-restore state: the tombstone is empty of
+        // nested subvols.  Recovery should be a no-op.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -990,25 +998,25 @@ last = 1
 
     #[test]
     fn recover_warns_when_live_subvol_missing() {
-        // Pathological state: a marker carries nested subvols but the
-        // live @ doesn't exist (e.g. crash between rename @ and the
-        // create_writable_snapshot step).  Recovery should leave the
-        // marker alone — moving the nested subvol into a non-existent
-        // path would be wrong, and the system can't have booted
-        // anyway.
+        // Pathological state: a tombstone carries nested subvols but
+        // the live @ doesn't exist (e.g. crash between rename @ and
+        // the create_writable_snapshot step).  Recovery should leave
+        // the tombstone alone — moving the nested subvol into a
+        // non-existent path would be wrong, and the system can't have
+        // booted anyway.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = MockBackend::new();
         // Note: deliberately NOT seeding /top/@.
         mock.seed_subvolume(toplevel.join(&config.sys.snapshot_subvol));
-        let marker = toplevel.join("@-DELETE-20260101-120000");
-        mock.seed_subvolume(marker.clone());
-        mock.seed_subvolume(marker.join("var/lib/portables"));
+        let tombstone = toplevel.join("@-DELETE-20260101-120000");
+        mock.seed_subvolume(tombstone.clone());
+        mock.seed_subvolume(tombstone.join("var/lib/portables"));
 
         let recovered = recover_orphaned_nested_subvols(&config, &mock, toplevel).unwrap();
         assert_eq!(recovered, 0);
         // Nothing was moved.
-        assert!(mock.contains(marker.join("var/lib/portables")));
+        assert!(mock.contains(tombstone.join("var/lib/portables")));
         assert!(!mock.contains("/top/@/var/lib/portables"));
     }
 
@@ -1017,7 +1025,7 @@ last = 1
         // The user installed something between the crashed restore and
         // the recovery run: the live @ now has its OWN subvol at
         // var/lib/portables.  We must not overwrite that — the orphan
-        // gets left in the marker for manual review.
+        // gets left in the tombstone for manual review.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -1025,37 +1033,37 @@ last = 1
         // Live @ already has a subvol at the colliding path.
         mock.seed_subvolume("/top/@/var/lib/portables");
 
-        let marker = toplevel.join("@-DELETE-20260101-120000");
-        mock.seed_subvolume(marker.clone());
-        mock.seed_subvolume(marker.join("var/lib/portables"));
+        let tombstone = toplevel.join("@-DELETE-20260101-120000");
+        mock.seed_subvolume(tombstone.clone());
+        mock.seed_subvolume(tombstone.join("var/lib/portables"));
 
         let recovered = recover_orphaned_nested_subvols(&config, &mock, toplevel).unwrap();
         assert_eq!(recovered, 0);
         // Both copies still present — the live one untouched, the
-        // orphan still in the marker.
+        // orphan still in the tombstone.
         assert!(mock.contains("/top/@/var/lib/portables"));
-        assert!(mock.contains(marker.join("var/lib/portables")));
+        assert!(mock.contains(tombstone.join("var/lib/portables")));
     }
 
     #[test]
-    fn recover_handles_multiple_markers_and_nested() {
-        // Two DELETE markers, each with multiple nested subvols.  All
+    fn recover_handles_multiple_tombstones_and_nested() {
+        // Two tombstones, each with multiple nested subvols.  All
         // should land in the live @ at their original relative paths.
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
 
-        let m1 = toplevel.join("@-DELETE-20260101-120000");
-        mock.seed_subvolume(m1.clone());
-        mock.seed_subvolume(m1.join("var/lib/portables"));
-        mock.seed_subvolume(m1.join("var/lib/machines"));
+        let t1 = toplevel.join("@-DELETE-20260101-120000");
+        mock.seed_subvolume(t1.clone());
+        mock.seed_subvolume(t1.join("var/lib/portables"));
+        mock.seed_subvolume(t1.join("var/lib/machines"));
 
-        let m2 = toplevel.join("@-DELETE-20260102-130000");
-        mock.seed_subvolume(m2.clone());
-        mock.seed_subvolume(m2.join("var/cache/build"));
+        let t2 = toplevel.join("@-DELETE-20260102-130000");
+        mock.seed_subvolume(t2.clone());
+        mock.seed_subvolume(t2.join("var/cache/build"));
 
         let recovered = recover_orphaned_nested_subvols(&config, &mock, toplevel).unwrap();
-        // 3 nested rescued in total.  Note that having two markers
+        // 3 nested rescued in total.  Note that having two tombstones
         // each carrying overlapping paths would surface as a
         // destination collision on the second one — that's tested
         // separately.
@@ -1066,7 +1074,7 @@ last = 1
     }
 
     #[test]
-    fn recover_ignores_markers_for_unknown_bases() {
+    fn recover_ignores_tombstones_for_unknown_bases() {
         // Unrelated `<unknown>-DELETE-<ts>` entries (e.g. from a
         // different tool, or a removed strain subvol) must not be
         // touched even if they happen to contain nested subvols.

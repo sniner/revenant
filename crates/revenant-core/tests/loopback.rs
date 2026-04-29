@@ -463,10 +463,10 @@ fn e2e_restore_creates_parent_path_for_nested_added_after_snapshot() {
 }
 
 #[test]
-fn e2e_recovery_hook_rescues_orphaned_nested_from_delete_marker() {
+fn e2e_recovery_hook_rescues_orphaned_nested_from_tombstone() {
     // Simulate a previous restore that crashed between the rename of
     // @ and the re-attach loop: the nested subvolume is stranded
-    // inside an @-DELETE-{ts} marker.  The recovery hook
+    // inside an @-DELETE-{ts} tombstone.  The recovery hook
     // (`recover_orphaned_nested_subvols`) that runs at the start of
     // every write command must pick it up and move it back into the
     // freshly recreated @.

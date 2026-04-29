@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use revenant_core::cleanup::DeleteMarker;
+use revenant_core::cleanup::Tombstone;
 use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
 use revenant_core::{LiveParentRef, RetainConfig, SnapshotInfo, StrainConfig};
 use zvariant::{OwnedValue, Value};
@@ -78,12 +78,12 @@ pub fn snapshot_to_dict(
     Ok(d)
 }
 
-pub fn delete_marker_to_dict(m: &DeleteMarker) -> DaemonResult<Dict> {
+pub fn tombstone_to_dict(t: &Tombstone) -> DaemonResult<Dict> {
     let mut d = Dict::new();
-    insert_str(&mut d, "name", &m.name)?;
-    insert_str(&mut d, "base_subvol", &m.base_subvol)?;
-    insert_str(&mut d, "id", m.id.as_str())?;
-    if let Some(ts) = m.id.created_at() {
+    insert_str(&mut d, "name", &t.name)?;
+    insert_str(&mut d, "base_subvol", &t.base_subvol)?;
+    insert_str(&mut d, "id", t.id.as_str())?;
+    if let Some(ts) = t.id.created_at() {
         insert_str(&mut d, "created", &ts.to_rfc3339())?;
     }
     Ok(d)

@@ -421,14 +421,14 @@ subvolumes = [{subvol_list}]
     }
 
     #[test]
-    fn orphans_ignore_delete_marker() {
+    fn orphans_ignore_tombstone() {
         let config = config_one_strain(&["@"]);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
         seed_in_snap_dir(&mock, &config, toplevel, "@-DELETE-20260316-143022");
 
         let findings = find_orphaned_snapshots(&config, &mock, toplevel).unwrap();
-        assert!(findings.is_empty(), "DELETE marker should not be flagged");
+        assert!(findings.is_empty(), "tombstone should not be flagged");
     }
 
     #[test]
@@ -596,7 +596,7 @@ subvolumes = [{subvol_list}]
     }
 
     #[test]
-    fn parse_delete_marker() {
+    fn parse_tombstone() {
         let p = parse_snapshot_name("@-DELETE-20260316-143022").unwrap();
         assert_eq!(p.strain, "DELETE");
     }

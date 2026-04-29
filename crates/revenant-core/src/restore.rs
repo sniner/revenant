@@ -15,16 +15,16 @@ use crate::snapshot::{SnapshotId, SnapshotInfo};
 ///    nested subvolumes ride along because their directory entries live in
 ///    the renamed tree), create a writable snapshot from the chosen
 ///    snapshot as the new live subvolume, then move each nested subvolume
-///    out of the DELETE marker and back into the freshly restored
-///    subvolume at the same relative path.  The DELETE marker survives
-///    until `revenantctl cleanup` or the next restore explicitly purges
-///    it, so it is available as a volatile undo buffer for the previous
-///    live state.
+///    out of the tombstone and back into the freshly restored subvolume
+///    at the same relative path.  The tombstone survives until
+///    `revenantctl cleanup` or the next restore explicitly purges it, so
+///    it is available as a volatile undo buffer for the previous live
+///    state.
 /// 3. Sync EFI content back from the boot snapshot to the ESP.
 ///
-/// No automatic pre-restore safety snapshot is created.  The DELETE
-/// marker *is* the pre-restore live subvolume (renamed, not copied), and
-/// an extra ro-snapshot in the strain only obscured which snapshots came
+/// No automatic pre-restore safety snapshot is created.  The tombstone
+/// *is* the pre-restore live subvolume (renamed, not copied), and an
+/// extra ro-snapshot in the strain only obscured which snapshots came
 /// from the configured boot/periodic timers and which were side effects
 /// of a restore.  Users who want a retained, strain-integrated safety
 /// copy should take a manual `revenantctl snapshot` before invoking
@@ -43,7 +43,7 @@ use crate::snapshot::{SnapshotId, SnapshotInfo};
 /// subvolume's parent directory tree (e.g. rolling back to a snapshot
 /// taken before `systemd-portables` was installed), the parent path is
 /// materialised on the fly via the backend so the re-attach can land.
-/// Otherwise the nested data would be stranded in the DELETE marker the
+/// Otherwise the nested data would be stranded in the tombstone the
 /// first time the user rolls back across the install — and would be
 /// silently lost the next time they tried to roll forward again.
 pub fn restore_snapshot(
@@ -81,8 +81,8 @@ pub fn restore_snapshot(
         });
     }
 
-    // Fresh timestamp used as the suffix on the DELETE markers so every
-    // subvol touched by this restore ends up under the same marker id.
+    // Fresh timestamp used as the suffix on the tombstones so every
+    // subvol touched by this restore ends up under the same id.
     let ts = SnapshotId::now();
 
     // 2. For each subvol: collect nested → rename → restore → reattach.
@@ -104,7 +104,7 @@ pub fn restore_snapshot(
             );
         }
 
-        // (b) Rename current → DELETE marker.  Nested subvols come along
+        // (b) Rename current → tombstone.  Nested subvols come along
         //     because their directory entries live in the renamed tree.
         tracing::info!("marking current {subvol} for deletion as {delete_name}");
         backend.rename_subvolume(&current, &delete_path)?;
@@ -114,7 +114,7 @@ pub fn restore_snapshot(
         tracing::info!("restoring {subvol} from snapshot {id}");
         backend.create_writable_snapshot(&snap_path, &current)?;
 
-        // (d) Re-attach nested subvolumes from the DELETE marker into the
+        // (d) Re-attach nested subvolumes from the tombstone into the
         //     freshly restored subvolume.  The snapshot itself contains
         //     only stub directories at the nested-subvol locations (btrfs
         //     does not snapshot nested subvols by default), so the rename
@@ -313,7 +313,7 @@ subvolumes = [{subvol_list}]
         // strain's snapshot list with something that wasn't a regular
         // timer-driven snapshot and confused users about which entries
         // were boot-unit snapshots and which were restore side effects.
-        // The live pre-restore subvolume is preserved as a DELETE marker
+        // The live pre-restore subvolume is preserved as a tombstone
         // (tested separately), which is a more honest representation:
         // the renamed live subvolume, not a second ro copy of it.
         let config = config_no_efi(&["@"]);
@@ -337,12 +337,12 @@ subvolumes = [{subvol_list}]
     }
 
     #[test]
-    fn delete_marker_survives_subsequent_create_snapshot() {
-        // After a restore, the DELETE marker must survive routine
-        // snapshot creation (boot unit, periodic timer, manual
-        // `revenantctl snapshot`) — it is the volatile undo buffer
-        // for the previous live state, purged only by
-        // `revenantctl cleanup` / the next restore.
+    fn tombstone_survives_subsequent_create_snapshot() {
+        // After a restore, the tombstone must survive routine snapshot
+        // creation (boot unit, periodic timer, manual
+        // `revenantctl snapshot`) — it is the volatile undo buffer for
+        // the previous live state, purged only by `revenantctl cleanup`
+        // / the next restore.
         let config = config_no_efi(&["@"]);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -351,8 +351,8 @@ subvolumes = [{subvol_list}]
         let snap = snap_info("20260316-143022", "default", &["@"]);
         restore_snapshot(&config, &mock, toplevel, &snap).unwrap();
 
-        // Grab the marker that the restore produced.
-        let marker_before = mock
+        // Grab the tombstone that the restore produced.
+        let tombstone_before = mock
             .all_paths()
             .into_iter()
             .find(|p| {
@@ -361,7 +361,7 @@ subvolumes = [{subvol_list}]
                         .and_then(|n| n.to_str())
                         .is_some_and(|n| n.starts_with("@-DELETE-"))
             })
-            .expect("expected DELETE marker after restore");
+            .expect("expected tombstone after restore");
 
         // Simulate a post-boot snapshot run.
         create_snapshot(
@@ -374,15 +374,15 @@ subvolumes = [{subvol_list}]
         )
         .unwrap();
 
-        // Marker still present at the same path.
+        // Tombstone still present at the same path.
         assert!(
-            mock.contains(&marker_before),
-            "DELETE marker must not be purged by create_snapshot"
+            mock.contains(&tombstone_before),
+            "tombstone must not be purged by create_snapshot"
         );
     }
 
     #[test]
-    fn renames_current_to_delete_marker() {
+    fn renames_current_to_tombstone() {
         let config = config_no_efi(&["@"]);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
@@ -391,16 +391,16 @@ subvolumes = [{subvol_list}]
         let snap = snap_info("20260316-143022", "default", &["@"]);
         restore_snapshot(&config, &mock, toplevel, &snap).unwrap();
 
-        // A `@-DELETE-{ts}` marker should now sit in toplevel.
-        let delete_marker = mock.all_paths().into_iter().find(|p| {
+        // A `@-DELETE-{ts}` tombstone should now sit in toplevel.
+        let tombstone = mock.all_paths().into_iter().find(|p| {
             p.parent() == Some(toplevel)
                 && p.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with("@-DELETE-"))
         });
         assert!(
-            delete_marker.is_some(),
-            "expected @-DELETE-* marker in toplevel"
+            tombstone.is_some(),
+            "expected @-DELETE-* tombstone in toplevel"
         );
     }
 
@@ -459,9 +459,9 @@ subvolumes = [{subvol_list}]
             "expected nested machines subvol to be re-attached"
         );
 
-        // The DELETE marker no longer carries the nested subvols — they
+        // The tombstone no longer carries the nested subvols — they
         // were moved out, not copied.
-        let delete_marker = mock
+        let tombstone = mock
             .all_paths()
             .into_iter()
             .find(|p| {
@@ -470,14 +470,14 @@ subvolumes = [{subvol_list}]
                         .and_then(|n| n.to_str())
                         .is_some_and(|n| n.starts_with("@-DELETE-"))
             })
-            .expect("expected @-DELETE-* marker after restore");
+            .expect("expected tombstone after restore");
         assert!(
-            !mock.contains(delete_marker.join("var/lib/portables")),
-            "nested portables should have been moved out of the DELETE marker"
+            !mock.contains(tombstone.join("var/lib/portables")),
+            "nested portables should have been moved out of the tombstone"
         );
         assert!(
-            !mock.contains(delete_marker.join("var/lib/machines")),
-            "nested machines should have been moved out of the DELETE marker"
+            !mock.contains(tombstone.join("var/lib/machines")),
+            "nested machines should have been moved out of the tombstone"
         );
     }
 
@@ -514,7 +514,7 @@ subvolumes = [{subvol_list}]
         // the rename of the nested subvolume into the freshly restored
         // @ would have nowhere to land — the parent path simply
         // doesn't exist in the restored tree — and the data would be
-        // stranded in the DELETE marker.  Verify that the orchestration
+        // stranded in the tombstone.  Verify that the orchestration
         // asks the backend to materialise the parent path before the
         // re-attach, and that the rename lands.
         let config = config_no_efi(&["@"]);
@@ -583,8 +583,8 @@ subvolumes = [{subvol_list}]
         // Both live subvolumes still present after restore.
         assert!(mock.contains("/top/@"));
         assert!(mock.contains("/top/@home"));
-        // And both have a DELETE marker.
-        let markers: Vec<_> = mock
+        // And both have a tombstone.
+        let tombstones: Vec<_> = mock
             .all_paths()
             .into_iter()
             .filter(|p| {
@@ -595,9 +595,9 @@ subvolumes = [{subvol_list}]
             })
             .collect();
         assert_eq!(
-            markers.len(),
+            tombstones.len(),
             2,
-            "expected one DELETE marker per subvol, got: {markers:?}"
+            "expected one tombstone per subvol, got: {tombstones:?}"
         );
     }
 }

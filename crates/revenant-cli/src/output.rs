@@ -288,21 +288,21 @@ pub fn print_retention_plan(mode: OutputMode, plan: &RetentionPlan) {
         println!();
     }
 
-    if !plan.delete_markers.is_empty() {
+    if !plan.tombstones.is_empty() {
         println!("DELETE markers (pending purge):");
-        for marker in &plan.delete_markers {
-            println!("  {}", marker.name);
+        for tombstone in &plan.tombstones {
+            println!("  {}", tombstone.name);
         }
         println!();
     }
 
-    let marker_count = plan.delete_markers.len();
-    if marker_count == 0 {
+    let tombstone_count = plan.tombstones.len();
+    if tombstone_count == 0 {
         println!("Summary: {total_kept} kept, {total_delete} to delete");
     } else {
-        let plural = if marker_count == 1 { "" } else { "s" };
+        let plural = if tombstone_count == 1 { "" } else { "s" };
         println!(
-            "Summary: {total_kept} kept, {total_delete} to delete, {marker_count} delete marker{plural}"
+            "Summary: {total_kept} kept, {total_delete} to delete, {tombstone_count} delete marker{plural}"
         );
     }
 }

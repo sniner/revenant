@@ -18,7 +18,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::dbus_thread::{Command, Event, Handles};
-use crate::model::{DeleteMarker, LiveParent, Retention, Snapshot, Strain};
+use crate::model::{LiveParent, Retention, Snapshot, Strain, Tombstone};
 
 const APP_ID: &str = "org.revenant.Gui";
 
@@ -65,13 +65,13 @@ struct AppState {
     /// selection; subsequent refreshes fall back to whatever the user
     /// is currently looking at.
     initial_pref_strain: Option<String>,
-    /// Pre-restore states (DELETE markers) currently on disk. Drives
-    /// the header-bar cleanup button's visibility and the contents of
-    /// the review dialog.
-    delete_markers: Vec<DeleteMarker>,
-    /// True between sending `Command::PurgeDeleteMarkers` and receiving
-    /// `Event::PurgeDeleteMarkersResult`. Gates the cleanup button so
-    /// a second polkit prompt can't queue.
+    /// Pre-restore states (tombstones) currently on disk. Drives the
+    /// header-bar cleanup button's visibility and the contents of the
+    /// review dialog.
+    tombstones: Vec<Tombstone>,
+    /// True between sending `Command::PurgeTombstones` and receiving
+    /// `Event::PurgeTombstonesResult`. Gates the cleanup button so a
+    /// second polkit prompt can't queue.
     purge_in_flight: bool,
     /// Toast displayed while a purge is being processed.
     purge_progress_toast: Option<adw::Toast>,
@@ -565,11 +565,11 @@ fn apply_event(
         Event::DeleteSnapshotResult { strain, id, result } => {
             apply_delete_snapshot_result(widgets, state, &strain, &id, result);
         }
-        Event::DeleteMarkers(result) => {
-            apply_delete_markers(widgets, state, result);
+        Event::Tombstones(result) => {
+            apply_tombstones(widgets, state, result);
         }
-        Event::PurgeDeleteMarkersResult(result) => {
-            apply_purge_delete_markers_result(widgets, state, result);
+        Event::PurgeTombstonesResult(result) => {
+            apply_purge_tombstones_result(widgets, state, result);
         }
     }
 }
@@ -1406,20 +1406,20 @@ fn present_delete_dialog(
 /// when the list is empty so the header stays clean in the common
 /// case; otherwise the button shows the count and a tooltip naming
 /// the concept in plain language.
-fn apply_delete_markers(
+fn apply_tombstones(
     widgets: &Widgets,
     state: &Rc<RefCell<AppState>>,
-    result: Result<Vec<DeleteMarker>, String>,
+    result: Result<Vec<Tombstone>, String>,
 ) {
-    let markers = match result {
-        Ok(m) => m,
+    let tombstones = match result {
+        Ok(t) => t,
         Err(reason) => {
             tracing::warn!("ListDeleteMarkers failed: {reason}");
             Vec::new()
         }
     };
-    let count = markers.len();
-    state.borrow_mut().delete_markers = markers;
+    let count = tombstones.len();
+    state.borrow_mut().tombstones = tombstones;
 
     let btn = &widgets.header_btn_cleanup;
     if count == 0 {
@@ -1446,18 +1446,18 @@ fn apply_delete_markers(
 }
 
 /// Build and present the pre-restore-states review dialog. One row
-/// per `DeleteMarker`, each with its own checkbox; default is "all
+/// per tombstone, each with its own checkbox; default is "all
 /// checked" so the typical case (user opens, hits Purge) is one
-/// click. Confirm dispatches `Command::PurgeDeleteMarkers`; the
-/// result arrives via `Event::PurgeDeleteMarkersResult`.
+/// click. Confirm dispatches `Command::PurgeTombstones`; the result
+/// arrives via `Event::PurgeTombstonesResult`.
 fn present_cleanup_dialog(
     parent: &adw::ApplicationWindow,
     widgets: &Widgets,
     state: &Rc<RefCell<AppState>>,
     cmd_tx: &async_channel::Sender<Command>,
 ) {
-    let markers = state.borrow().delete_markers.clone();
-    if markers.is_empty() {
+    let tombstones = state.borrow().tombstones.clone();
+    if tombstones.is_empty() {
         return;
     }
 
@@ -1477,23 +1477,23 @@ fn present_cleanup_dialog(
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
 
-    // One AdwActionRow per marker, with a CheckButton suffix that
+    // One AdwActionRow per tombstone, with a CheckButton suffix that
     // doubles as the row's activation widget — clicking anywhere on
     // the row toggles the checkbox.
     let group = adw::PreferencesGroup::builder().build();
-    let mut row_checks: Vec<(String, gtk::CheckButton)> = Vec::with_capacity(markers.len());
-    for m in &markers {
-        let row = adw::ActionRow::builder().title(&m.name).build();
-        if let Some(created) = format_marker_created(m) {
-            row.set_subtitle(&format!("{} · from {}", m.base_subvol, created));
+    let mut row_checks: Vec<(String, gtk::CheckButton)> = Vec::with_capacity(tombstones.len());
+    for t in &tombstones {
+        let row = adw::ActionRow::builder().title(&t.name).build();
+        if let Some(created) = format_tombstone_created(t) {
+            row.set_subtitle(&format!("{} · from {}", t.base_subvol, created));
         } else {
-            row.set_subtitle(&m.base_subvol);
+            row.set_subtitle(&t.base_subvol);
         }
         let check = gtk::CheckButton::builder().active(true).build();
         row.add_suffix(&check);
         row.set_activatable_widget(Some(&check));
         group.add(&row);
-        row_checks.push((m.name.clone(), check));
+        row_checks.push((t.name.clone(), check));
     }
     dialog.set_extra_child(Some(&group));
 
@@ -1523,13 +1523,13 @@ fn present_cleanup_dialog(
         widgets_for_cb.toast_overlay.add_toast(toast.clone());
         state_for_cb.borrow_mut().purge_progress_toast = Some(toast);
 
-        let _ = cmd_tx_for_cb.send_blocking(Command::PurgeDeleteMarkers(selected));
+        let _ = cmd_tx_for_cb.send_blocking(Command::PurgeTombstones(selected));
     });
 
     dialog.present(Some(parent));
 }
 
-fn apply_purge_delete_markers_result(
+fn apply_purge_tombstones_result(
     widgets: &Widgets,
     state: &Rc<RefCell<AppState>>,
     result: Result<Vec<String>, String>,
@@ -1562,11 +1562,11 @@ fn apply_purge_delete_markers_result(
     }
 }
 
-/// Format a marker's `created` timestamp for the row subtitle. Falls
-/// back to the raw RFC 3339 if it doesn't parse, then `None` so the
-/// caller drops the date entirely.
-fn format_marker_created(m: &DeleteMarker) -> Option<String> {
-    let rfc = m.created.as_deref()?;
+/// Format a tombstone's `created` timestamp for the row subtitle.
+/// Falls back to the raw RFC 3339 if it doesn't parse, then `None` so
+/// the caller drops the date entirely.
+fn format_tombstone_created(t: &Tombstone) -> Option<String> {
+    let rfc = t.created.as_deref()?;
     let parsed = chrono::DateTime::parse_from_rfc3339(rfc).ok()?;
     let g = glib::DateTime::from_unix_local(parsed.timestamp()).ok()?;
     g.format("%e. %B %Y, %H:%M:%S")

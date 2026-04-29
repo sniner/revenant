@@ -84,11 +84,15 @@ pub struct LiveParent {
     pub id: String,
 }
 
-/// One `<base>-DELETE-<ts>` subvolume left over from a previous
-/// restore. These are not snapshots — they're the *previous live
-/// state*, renamed at restore time as the user's safety net.
+/// A tombstone — one `<base>-DELETE-<ts>` subvolume left over from a
+/// previous restore. These are not snapshots; they're the *previous
+/// live state*, renamed at restore time as the user's safety net.
+///
+/// External D-Bus API uses "delete-marker" names (ListDeleteMarkers
+/// etc.); internally we use "tombstone" because "delete" is too
+/// generic for this very specific concept.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteMarker {
+pub struct Tombstone {
     /// Full subvolume name, e.g. `"@-DELETE-20260411-080055"`.
     pub name: String,
     /// The live subvol this was renamed from (`"@"`, `"@home"`).
@@ -100,7 +104,7 @@ pub struct DeleteMarker {
     pub created: Option<String>,
 }
 
-impl DeleteMarker {
+impl Tombstone {
     pub fn from_dict(d: &Dict) -> Option<Self> {
         let name = read_str(d, "name")?.to_string();
         let base_subvol = read_str(d, "base_subvol")?.to_string();

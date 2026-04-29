@@ -1,12 +1,12 @@
 # D-Bus service activation file for revenant-daemon.
 #
-# Installed to: /usr/share/dbus-1/system-services/org.revenant.Daemon1.service
+# Installed to: /usr/share/dbus-1/system-services/dev.sniner.Revenant.service
 #
-# When a client connects to org.revenant.Daemon1 on the system bus,
+# When a client connects to dev.sniner.Revenant on the system bus,
 # dbus-broker (or dbus-daemon) starts the matching systemd unit.
 
 [D-BUS Service]
-Name=org.revenant.Daemon1
+Name=dev.sniner.Revenant
 Exec=/usr/bin/false
 User=root
 SystemdService=revenant-daemon.service

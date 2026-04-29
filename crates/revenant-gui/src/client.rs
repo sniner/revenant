@@ -1,4 +1,4 @@
-//! Connection wrapper around `org.revenant.Daemon1`.
+//! Connection wrapper around `dev.sniner.Revenant1`.
 //!
 //! Owns the system-bus `Connection` and a typed `DaemonProxy` against
 //! it. Higher layers (the worker thread in `dbus_thread`) call
@@ -22,7 +22,7 @@ pub struct Client {
 
 impl Client {
     /// Connect to the system bus and bind a proxy to
-    /// `org.revenant.Daemon1`. Fails if the bus is unreachable;
+    /// `dev.sniner.Revenant1`. Fails if the bus is unreachable;
     /// **does not** fail if the daemon is currently inactive — the
     /// proxy is bound to the well-known name, and the first method
     /// call will trigger D-Bus activation.
@@ -32,7 +32,7 @@ impl Client {
             .context("connect to system bus")?;
         let proxy = DaemonProxy::new(&conn)
             .await
-            .context("build org.revenant.Daemon1 proxy")?;
+            .context("build dev.sniner.Revenant1 proxy")?;
         Ok(Self { proxy })
     }
 

@@ -7,7 +7,7 @@ this daemon — see [the design doc][design] for the rationale.
 [design]: ../../docs/design/dbus-interface.md
 
 The daemon owns the btrfs toplevel mount for its entire runtime
-(at `/run/revenant/toplevel`) and exposes the `org.revenant.Daemon1`
+(at `/run/revenant/toplevel`) and exposes the `dev.sniner.Revenant1`
 interface on the **system bus**. Authorization for individual methods
 is delegated to polkit. Per-call wire contract: see [the design doc][design].
 
@@ -64,14 +64,14 @@ before they reach the daemon at all).
 #    is not created until something else needs it. Harmless on systems
 #    where the dir already exists.
 sudo mkdir -p /etc/dbus-1/system.d
-sudo install -m644 data/org.revenant.Daemon1.conf /etc/dbus-1/system.d/
+sudo install -m644 data/dev.sniner.Revenant.conf /etc/dbus-1/system.d/
 
 # 2. Polkit action definitions. Every privileged method
 #    (SetStrainRetention / CreateSnapshot / DeleteSnapshot / Restore)
 #    asks polkit for an action by id; without this file polkit replies
 #    "action not registered" and the call fails before it ever reaches
 #    the daemon's logic.
-sudo install -m644 data/org.revenant.policy /usr/share/polkit-1/actions/
+sudo install -m644 data/dev.sniner.Revenant.policy /usr/share/polkit-1/actions/
 
 # 3. Reload the bus so it picks up the new policy. Use whichever unit
 #    is running on your system — `dbus.service` on Arch and Debian-
@@ -82,7 +82,7 @@ sudo systemctl reload dbus.service   # or: dbus-broker.service
 ```
 
 That's all that is required for development. The D-Bus
-service-activation file (`data/org.revenant.Daemon1.service`) and the
+service-activation file (`data/dev.sniner.Revenant.service`) and the
 systemd unit (`data/revenant-daemon.service`) are **not** needed while
 you start the daemon by hand — they only matter for an installed
 system where the daemon is meant to be started on demand by D-Bus
@@ -112,7 +112,7 @@ This relies on the SSH session being a logind session — check with
 `loginctl show-session $XDG_SESSION_ID` if no prompt appears.
 
 **Option (b): permissive polkit rule (dev VM only).** Bypass the auth
-prompt entirely for `org.revenant.*` actions when the caller is in the
+prompt entirely for `dev.sniner.Revenant.*` actions when the caller is in the
 `wheel` group:
 
 ```sh
@@ -120,10 +120,10 @@ sudoedit /etc/polkit-1/rules.d/49-revenant-dev.rules
 ```
 
 ```javascript
-// Dev-only: grant all org.revenant.* actions to wheel group without prompt.
+// Dev-only: grant all dev.sniner.Revenant.* actions to wheel group without prompt.
 // Remove this file before testing the real auth-prompt flow via the GUI.
 polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.revenant.") === 0 &&
+    if (action.id.indexOf("dev.sniner.Revenant.") === 0 &&
         subject.isInGroup("wheel")) {
         return polkit.Result.YES;
     }
@@ -145,7 +145,7 @@ Expected log lines on a healthy start:
 revenantd <version> starting
 mounted btrfs toplevel (/dev/disk/by-uuid/…) on /run/revenant/toplevel
 daemon ready
-registered org.revenant.Daemon1 on /org/revenant/Daemon
+registered dev.sniner.Revenant on /dev/sniner/Revenant
 snapshot watcher watching /run/revenant/toplevel/@snapshots
 config watcher watching /etc/revenant
 ```
@@ -161,11 +161,11 @@ In a second shell:
 
 ```sh
 # Daemon health.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 GetVersion
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 GetVersion
 
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 GetDaemonInfo
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 GetDaemonInfo
 ```
 
 `GetDaemonInfo` returns an `a{sv}` dict with at least:
@@ -179,23 +179,23 @@ busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
 
 ```sh
 # Strain inspection.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 ListStrains
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 ListStrains
 
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 GetStrain s default
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 GetStrain s default
 
 # Snapshot listing — empty filter means "all strains".
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 ListSnapshots 'a{sv}' 0
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 ListSnapshots 'a{sv}' 0
 
 # Same, but only the "default" strain.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 ListSnapshots 'a{sv}' 1 strain s default
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 ListSnapshots 'a{sv}' 1 strain s default
 
 # Live anchor — empty dict means "pristine system, no anchor".
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 GetLiveParent
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 GetLiveParent
 ```
 
 Cross-check against the CLI: `revenantctl list` should show the same
@@ -215,33 +215,33 @@ snapshots, with the `*`-marked anchor matching `GetLiveParent`'s
 # Edit retention: set strain "default" to last=5, daily=14, others
 # disabled. Note the array length (2) before the key/type/value
 # triples.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 SetStrainRetention sa{sv} default 2 \
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 SetStrainRetention sa{sv} default 2 \
         last u 5 daily u 14
 
 # Take a snapshot (empty message → omitted in the sidecar). The reply
 # contains the new id; substitute it into the Delete call below.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 CreateSnapshot ss default ""
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 CreateSnapshot ss default ""
 
 # Delete a snapshot by (strain, id). Replace 20260426-150156-977 with
 # the id printed by CreateSnapshot above.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 DeleteSnapshot ss default 20260426-150156-977
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 DeleteSnapshot ss default 20260426-150156-977
 
 # Restore: pick a (strain, id) pair from `ListSnapshots`. Dry-run
 # first to inspect preflight findings without touching anything
 # (same reply shape as a real restore, but `dry_run=true` and no
 # state change).
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 Restore ssa{sv} <strain> <id> 1 \
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 Restore ssa{sv} <strain> <id> 1 \
         dry_run b true
 
 # Real restore with save_current (this is the default; shown
 # explicitly here for completeness). Captures the current state as
 # a pre-restore snapshot in the target strain before swapping over.
-busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
-    org.revenant.Daemon1 Restore ssa{sv} <strain> <id> 1 \
+busctl --system call dev.sniner.Revenant /dev/sniner/Revenant \
+    dev.sniner.Revenant1 Restore ssa{sv} <strain> <id> 1 \
         save_current b true
 ```
 
@@ -250,7 +250,7 @@ busctl --system call org.revenant.Daemon1 /org/revenant/Daemon \
 # `sudo revenantctl snapshot default -m test` and see a
 # SnapshotsChanged signal appear here. After a Restore call, you
 # also see LiveParentChanged.
-busctl --system monitor org.revenant.Daemon1
+busctl --system monitor dev.sniner.Revenant
 ```
 
 Confirm the mount actually happened. `/run/revenant/` is created with
@@ -284,8 +284,8 @@ sudo rmdir /run/revenant/toplevel /run/revenant
 Removing the policy files:
 
 ```sh
-sudo rm /etc/dbus-1/system.d/org.revenant.Daemon1.conf
-sudo rm /usr/share/polkit-1/actions/org.revenant.policy
+sudo rm /etc/dbus-1/system.d/dev.sniner.Revenant.conf
+sudo rm /usr/share/polkit-1/actions/dev.sniner.Revenant.policy
 sudo rm -f /etc/polkit-1/rules.d/49-revenant-dev.rules   # if you used option (b)
 sudo systemctl reload dbus.service                       # or: dbus-broker.service
 ```
@@ -297,7 +297,7 @@ sudo systemctl reload dbus.service                       # or: dbus-broker.servi
   list anyway in practice.
 - `DaemonStateChanged` is declared but never emitted; intended for
   transitions in/out of degraded state.
-- Custom `org.revenant.Error.*` D-Bus errors — currently everything
+- Custom `dev.sniner.Revenant.Error.*` D-Bus errors — currently everything
   not modelled by `fdo` goes through `org.freedesktop.DBus.Error.Failed`
   with a human-readable message. Functional, but not ideal for clients
   that want to branch on error kind.

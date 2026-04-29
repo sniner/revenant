@@ -1,4 +1,4 @@
-//! Typed `zbus` proxy for the `org.revenant.Daemon1` interface.
+//! Typed `zbus` proxy for the `dev.sniner.Revenant1` interface.
 //!
 //! Mirrors the daemon-side `#[interface]` declarations in
 //! `crates/revenant-daemon/src/dbus.rs`. Wire types are kept as
@@ -7,7 +7,7 @@
 //! layer above and decode out of these.
 //!
 //! Custom errors arrive as `zbus::Error::MethodError(name, …)` —
-//! the wire name (`org.revenant.Error.NotFound`, etc.) is the
+//! the wire name (`dev.sniner.Revenant.Error.NotFound`, etc.) is the
 //! authoritative discriminator. Translating them into a typed
 //! client-side error enum is deliberately deferred; the GUI's
 //! error-handling slice will model that once it has concrete UX
@@ -28,9 +28,9 @@ pub type Dict = HashMap<String, OwnedValue>;
 pub type StrainTuple = (String, Vec<String>, bool, Dict, String);
 
 #[proxy(
-    interface = "org.revenant.Daemon1",
-    default_service = "org.revenant.Daemon1",
-    default_path = "/org/revenant/Daemon"
+    interface = "dev.sniner.Revenant1",
+    default_service = "dev.sniner.Revenant",
+    default_path = "/dev/sniner/Revenant"
 )]
 pub trait Daemon {
     // -- Discovery / metadata ------------------------------------------

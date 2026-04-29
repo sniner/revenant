@@ -2,7 +2,7 @@
 #
 # Installed to: /usr/lib/systemd/system/revenant-daemon.service
 #
-# Started on demand via D-Bus activation (see org.revenant.Daemon1.service).
+# Started on demand via D-Bus activation (see dev.sniner.Revenant.service).
 
 [Unit]
 Description=Revenant snapshot management daemon
@@ -15,7 +15,7 @@ After=systemd-tmpfiles-setup.service
 
 [Service]
 Type=dbus
-BusName=org.revenant.Daemon1
+BusName=dev.sniner.Revenant
 ExecStart=/usr/bin/revenantd
 # Allow sd_notify(STATUS=…) so `systemctl status` reflects the
 # daemon's current state ("ready, version x.y.z" or "degraded: …").

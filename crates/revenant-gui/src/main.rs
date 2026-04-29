@@ -20,7 +20,7 @@ use gtk::glib;
 use crate::dbus_thread::{Command, Event, Handles};
 use crate::model::{LiveParent, Retention, Snapshot, Strain, Tombstone};
 
-const APP_ID: &str = "org.revenant.Gui";
+const APP_ID: &str = "dev.sniner.RevenantGui";
 
 /// Mutable UI state shared between event handlers and widget callbacks.
 /// `Rc<RefCell<...>>` is the standard gtk-rs idiom because GTK is

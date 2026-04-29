@@ -1,4 +1,4 @@
-//! Custom `org.revenant.Error.*` D-Bus errors.
+//! Custom `dev.sniner.Revenant.Error.*` D-Bus errors.
 //!
 //! Per `docs/design/dbus-interface.md`, application-level failures go
 //! through one of these variants instead of `org.freedesktop.DBus
@@ -13,7 +13,7 @@
 use zbus::DBusError;
 
 #[derive(Debug, DBusError)]
-#[zbus(prefix = "org.revenant.Error")]
+#[zbus(prefix = "dev.sniner.Revenant.Error")]
 pub enum DaemonError {
     /// Pass-through for standard zbus errors (transport, marshalling,
     /// peer disconnects). Required by the derive macro for non-namespace
@@ -70,31 +70,31 @@ mod tests {
         let cases = [
             (
                 DaemonError::NotAuthorized("x".into()),
-                "org.revenant.Error.NotAuthorized",
+                "dev.sniner.Revenant.Error.NotAuthorized",
             ),
             (
                 DaemonError::NotFound("x".into()),
-                "org.revenant.Error.NotFound",
+                "dev.sniner.Revenant.Error.NotFound",
             ),
             (
                 DaemonError::InvalidArgument("x".into()),
-                "org.revenant.Error.InvalidArgument",
+                "dev.sniner.Revenant.Error.InvalidArgument",
             ),
             (
                 DaemonError::PreflightBlocked("x".into()),
-                "org.revenant.Error.PreflightBlocked",
+                "dev.sniner.Revenant.Error.PreflightBlocked",
             ),
             (
                 DaemonError::Conflict("x".into()),
-                "org.revenant.Error.Conflict",
+                "dev.sniner.Revenant.Error.Conflict",
             ),
             (
                 DaemonError::BackendUnavailable("x".into()),
-                "org.revenant.Error.BackendUnavailable",
+                "dev.sniner.Revenant.Error.BackendUnavailable",
             ),
             (
                 DaemonError::Internal("x".into()),
-                "org.revenant.Error.Internal",
+                "dev.sniner.Revenant.Error.Internal",
             ),
         ];
         for (err, expected) in cases {

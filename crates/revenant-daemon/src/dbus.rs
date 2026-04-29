@@ -1,4 +1,4 @@
-//! D-Bus interface implementation for `org.revenant.Daemon1`.
+//! D-Bus interface implementation for `dev.sniner.Revenant1`.
 //!
 //! Slices implemented so far:
 //! 1. Mount lifecycle + `GetVersion` / `GetDaemonInfo`.
@@ -48,7 +48,7 @@ impl Daemon {
     }
 }
 
-#[interface(name = "org.revenant.Daemon1")]
+#[interface(name = "dev.sniner.Revenant1")]
 impl Daemon {
     // -- Discovery / metadata ------------------------------------------
 
@@ -111,7 +111,7 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "org.revenant.config.edit").await?;
+        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.config.edit").await?;
 
         // Validate the strain exists before we touch the file.
         {
@@ -211,7 +211,7 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "org.revenant.snapshot.create").await?;
+        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.snapshot.create").await?;
 
         let ready = self.state.ready().await?;
         let info = core_create_snapshot(
@@ -238,7 +238,7 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "org.revenant.snapshot.delete").await?;
+        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.snapshot.delete").await?;
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
@@ -297,7 +297,7 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "org.revenant.cleanup").await?;
+        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.cleanup").await?;
 
         let ready = self.state.ready().await?;
         let removed = purge_tombstones_by_name(
@@ -343,7 +343,7 @@ impl Daemon {
         let sender = hdr
             .sender()
             .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "org.revenant.restore").await?;
+        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.restore").await?;
 
         let save_current = read_bool_opt(&options, "save_current").unwrap_or(true);
         let dry_run = read_bool_opt(&options, "dry_run").unwrap_or(false);

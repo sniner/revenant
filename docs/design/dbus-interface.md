@@ -19,14 +19,18 @@ its standalone, daemon-free operation. The daemon and the CLI share
 | Item             | Value                                |
 | ---------------- | ------------------------------------ |
 | Bus              | system bus                           |
-| Service name     | `org.revenant.Daemon1`               |
-| Object path      | `/org/revenant/Daemon`               |
-| Primary iface    | `org.revenant.Daemon1`               |
+| Service name     | `dev.sniner.Revenant`                |
+| Object path      | `/dev/sniner/Revenant`               |
+| Primary iface    | `dev.sniner.Revenant1`               |
 | Activation       | systemd-activated (`dbus-broker`)    |
 | Implementation   | `zbus` (Rust)                        |
 
-The trailing `1` in the names is the API version. Breaking changes ship as
-`org.revenant.Daemon2` alongside the old one for a deprecation period.
+The trailing `1` on the **interface** is the API version. The service name and
+the object path stay unversioned — the daemon's identity does not change when
+the wire contract evolves. Breaking changes add a sibling interface
+(`dev.sniner.Revenant2`) on the same object path; clients negotiate which one
+they speak. This follows the modern freedesktop convention (NetworkManager,
+UPower) rather than the systemd1/UDisks2 style of versioning the service name.
 
 ## Lifecycle
 
@@ -41,17 +45,17 @@ The trailing `1` in the names is the API version. Breaking changes ship as
 
 ## Polkit actions
 
-| Action                          | Default rule        | Notes                                  |
-| ------------------------------- | ------------------- | -------------------------------------- |
-| `org.revenant.list`             | `yes`               | Read-only listing, allowed for any user. |
-| `org.revenant.snapshot.create`  | `auth_admin_keep`   | Cached for the standard polkit window. |
-| `org.revenant.snapshot.delete`  | `auth_admin_keep`   | Cached.                                |
-| `org.revenant.config.edit`      | `auth_admin_keep`   | Cached.                                |
-| `org.revenant.restore`          | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
-| `org.revenant.cleanup`          | `auth_admin_keep`   | Purges pre-restore DELETE markers.     |
+| Action                                | Default rule        | Notes                                  |
+| ------------------------------------- | ------------------- | -------------------------------------- |
+| `dev.sniner.Revenant.list`            | `yes`               | Read-only listing, allowed for any user. |
+| `dev.sniner.Revenant.snapshot.create` | `auth_admin_keep`   | Cached for the standard polkit window. |
+| `dev.sniner.Revenant.snapshot.delete` | `auth_admin_keep`   | Cached.                                |
+| `dev.sniner.Revenant.config.edit`     | `auth_admin_keep`   | Cached.                                |
+| `dev.sniner.Revenant.restore`         | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
+| `dev.sniner.Revenant.cleanup`         | `auth_admin_keep`   | Purges pre-restore DELETE markers.     |
 
-The polkit policy file ships in `data/org.revenant.policy` and is installed
-to `/usr/share/polkit-1/actions/`.
+The polkit policy file ships in `data/dev.sniner.Revenant.policy` and is
+installed to `/usr/share/polkit-1/actions/`.
 
 ## Types
 
@@ -107,7 +111,7 @@ live rootfs has no resolvable parent (pristine system, or anchor lost).
 
 ## Methods
 
-All methods are on the primary interface `org.revenant.Daemon1` unless
+All methods are on the primary interface `dev.sniner.Revenant1` unless
 otherwise noted.
 
 ### Discovery / metadata
@@ -126,7 +130,7 @@ GetLatestStrain() -> (s)                        -- name of strain whose newest s
                                                 --   has the most recent timestamp; "" if
                                                 --   no strain has any snapshot. Lets the
                                                 --   GUI pick a sensible initial selection.
-SetStrainRetention(name: s, retention: a{sv})   -- privileged: org.revenant.config.edit
+SetStrainRetention(name: s, retention: a{sv})   -- privileged: dev.sniner.Revenant.config.edit
 ```
 
 `SetStrainRetention` rewrites only the `[strain.<name>.retain]` section in
@@ -142,9 +146,9 @@ remains a config-file edit.
 ```text
 ListSnapshots(filter: a{sv}) -> (aa{sv})        -- filter: optional {"strain": s}
 GetSnapshot(strain: s, id: s) -> (a{sv})
-CreateSnapshot(strain: s, message: as) -> (a{sv}) -- privileged: org.revenant.snapshot.create
+CreateSnapshot(strain: s, message: as) -> (a{sv}) -- privileged: dev.sniner.Revenant.snapshot.create
                                                   --   returns the new Snapshot dict
-DeleteSnapshot(strain: s, id: s) -> ()           -- privileged: org.revenant.snapshot.delete
+DeleteSnapshot(strain: s, id: s) -> ()           -- privileged: dev.sniner.Revenant.snapshot.delete
 ```
 
 `CreateSnapshot` and `DeleteSnapshot` complete well under a second
@@ -165,7 +169,7 @@ methods.
 
 ```text
 ListDeleteMarkers() -> (aa{sv})                 -- array of DeleteMarker
-PurgeDeleteMarkers(names: as) -> (as)           -- privileged: org.revenant.cleanup
+PurgeDeleteMarkers(names: as) -> (as)           -- privileged: dev.sniner.Revenant.cleanup
                                                 --   returns names actually removed
 ```
 
@@ -199,7 +203,7 @@ either, and the surface stays small.
 ### Restore
 
 ```text
-Restore(strain: s, id: s, options: a{sv}) -> (a{sv}) -- privileged: org.revenant.restore
+Restore(strain: s, id: s, options: a{sv}) -> (a{sv}) -- privileged: dev.sniner.Revenant.restore
 ```
 
 `options` keys (initial set):
@@ -231,7 +235,7 @@ can be added without breaking this signature.
 
 ## Signals
 
-On `org.revenant.Daemon1`:
+On `dev.sniner.Revenant1`:
 
 ```text
 SnapshotsChanged(strain: s)                     -- "" means: any/all
@@ -247,18 +251,18 @@ automatically with property/signal proxies).
 
 ## Errors
 
-D-Bus errors use the `org.revenant.Error.*` namespace, each mapping back
-to a variant of `revenant_core::RevenantError`:
+D-Bus errors use the `dev.sniner.Revenant.Error.*` namespace, each mapping
+back to a variant of `revenant_core::RevenantError`:
 
-| D-Bus error                              | Maps to                            |
-| ---------------------------------------- | ---------------------------------- |
-| `org.revenant.Error.NotAuthorized`       | polkit denial                      |
-| `org.revenant.Error.NotFound`            | unknown strain or snapshot id      |
-| `org.revenant.Error.InvalidArgument`     | malformed input                    |
-| `org.revenant.Error.PreflightBlocked`    | restore preflight reported `Severity::Error` findings |
-| `org.revenant.Error.Conflict`            | concurrent operation in progress   |
-| `org.revenant.Error.BackendUnavailable`  | toplevel not mounted, btrfs missing |
-| `org.revenant.Error.Internal`            | catch-all; details in message      |
+| D-Bus error                                       | Maps to                            |
+| ------------------------------------------------- | ---------------------------------- |
+| `dev.sniner.Revenant.Error.NotAuthorized`         | polkit denial                      |
+| `dev.sniner.Revenant.Error.NotFound`              | unknown strain or snapshot id      |
+| `dev.sniner.Revenant.Error.InvalidArgument`       | malformed input                    |
+| `dev.sniner.Revenant.Error.PreflightBlocked`      | restore preflight reported `Severity::Error` findings |
+| `dev.sniner.Revenant.Error.Conflict`              | concurrent operation in progress   |
+| `dev.sniner.Revenant.Error.BackendUnavailable`    | toplevel not mounted, btrfs missing |
+| `dev.sniner.Revenant.Error.Internal`              | catch-all; details in message      |
 
 ## Concurrency
 

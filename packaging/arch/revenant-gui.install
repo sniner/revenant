@@ -2,8 +2,12 @@
 #
 # What we DO need to do here:
 #   * Reload the system bus so it sees the new bus policy
-#     (/usr/share/dbus-1/system.d/org.revenant.Daemon1.conf) and the
+#     (/usr/share/dbus-1/system.d/dev.sniner.Revenant.conf) and the
 #     activation file (/usr/share/dbus-1/system-services/...).
+#   * On upgrade from <0.1.7, remove the old `org.revenant.*` D-Bus,
+#     polkit, and activation files before they collide with the new
+#     `dev.sniner.Revenant*` files (different filenames, both would
+#     coexist on disk and confuse dbus / polkit).
 #   * Stop the running daemon on uninstall so its mount under
 #     /run/revenant/toplevel is cleanly torn down.
 #
@@ -25,8 +29,21 @@ _dbus_reload() {
         || :
 }
 
+_purge_legacy_dbus_files() {
+    # 0.1.6 used the org.revenant namespace; 0.1.7 switched to
+    # dev.sniner.Revenant. Old files under the previous filenames
+    # would otherwise stay around and confuse dbus / polkit.
+    rm -f /usr/share/dbus-1/system.d/org.revenant.Daemon1.conf
+    rm -f /usr/share/dbus-1/system-services/org.revenant.Daemon1.service
+    rm -f /usr/share/polkit-1/actions/org.revenant.policy
+}
+
 post_install() {
     _dbus_reload
+}
+
+pre_upgrade() {
+    _purge_legacy_dbus_files
 }
 
 post_upgrade() {

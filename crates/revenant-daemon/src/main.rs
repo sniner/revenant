@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 use sd_notify::NotifyState;
 use tracing_subscriber::EnvFilter;
 
-const BUS_NAME: &str = "org.revenant.Daemon1";
-const OBJECT_PATH: &str = "/org/revenant/Daemon";
+const BUS_NAME: &str = "dev.sniner.Revenant";
+const OBJECT_PATH: &str = "/dev/sniner/Revenant";
 const CONFIG_DIR: &str = "/etc/revenant";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]

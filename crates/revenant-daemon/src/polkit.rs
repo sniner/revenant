@@ -5,7 +5,7 @@
 //! X?" and get a yes/no — possibly after an interactive auth prompt
 //! shown by the user's session agent.
 //!
-//! The polkit action ids match `data/org.revenant.policy`.
+//! The polkit action ids match `data/dev.sniner.Revenant.policy`.
 
 use std::collections::HashMap;
 

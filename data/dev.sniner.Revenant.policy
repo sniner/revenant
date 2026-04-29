@@ -6,7 +6,7 @@
 <!--
   Polkit actions for revenant-daemon.
 
-  Installed to: /usr/share/polkit-1/actions/org.revenant.policy
+  Installed to: /usr/share/polkit-1/actions/dev.sniner.Revenant.policy
 
   See: docs/design/dbus-interface.md
 -->
@@ -14,7 +14,7 @@
   <vendor>Revenant</vendor>
   <vendor_url>https://github.com/sniner/revenant</vendor_url>
 
-  <action id="org.revenant.list">
+  <action id="dev.sniner.Revenant.list">
     <description>List snapshots and strain configuration</description>
     <message>Authentication is not required to list snapshots.</message>
     <defaults>
@@ -24,7 +24,7 @@
     </defaults>
   </action>
 
-  <action id="org.revenant.snapshot.create">
+  <action id="dev.sniner.Revenant.snapshot.create">
     <description>Create a snapshot</description>
     <message>Authentication is required to create a snapshot.</message>
     <defaults>
@@ -34,7 +34,7 @@
     </defaults>
   </action>
 
-  <action id="org.revenant.snapshot.delete">
+  <action id="dev.sniner.Revenant.snapshot.delete">
     <description>Delete a snapshot</description>
     <message>Authentication is required to delete a snapshot.</message>
     <defaults>
@@ -44,7 +44,7 @@
     </defaults>
   </action>
 
-  <action id="org.revenant.config.edit">
+  <action id="dev.sniner.Revenant.config.edit">
     <description>Modify revenant configuration (e.g. retention policy)</description>
     <message>Authentication is required to change the snapshot configuration.</message>
     <defaults>
@@ -54,7 +54,7 @@
     </defaults>
   </action>
 
-  <action id="org.revenant.restore">
+  <action id="dev.sniner.Revenant.restore">
     <description>Restore a snapshot (replaces the current system state)</description>
     <message>Authentication is required to restore a snapshot. The running system will be rolled back at the next reboot.</message>
     <defaults>
@@ -65,7 +65,7 @@
     </defaults>
   </action>
 
-  <action id="org.revenant.cleanup">
+  <action id="dev.sniner.Revenant.cleanup">
     <description>Purge pre-restore states (DELETE markers)</description>
     <message>Authentication is required to remove pre-restore states left over from earlier rollbacks.</message>
     <defaults>

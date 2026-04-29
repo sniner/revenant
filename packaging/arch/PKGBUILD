@@ -96,18 +96,18 @@ package_revenant-gui() {
     # dbus-daemon and dbus-broker. (The repo's README points at
     # /etc/dbus-1/system.d/ for dev installs; for a package we
     # use /usr/share/.)
-    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.Daemon1.conf" \
-        "$pkgdir/usr/share/dbus-1/system.d/org.revenant.Daemon1.conf"
+    install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.Revenant.conf" \
+        "$pkgdir/usr/share/dbus-1/system.d/dev.sniner.Revenant.conf"
 
     # D-Bus service activation: lets clients trigger systemd to
     # start revenant-daemon.service on the first method call.
-    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.Daemon1.service" \
-        "$pkgdir/usr/share/dbus-1/system-services/org.revenant.Daemon1.service"
+    install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.Revenant.service" \
+        "$pkgdir/usr/share/dbus-1/system-services/dev.sniner.Revenant.service"
 
     # Polkit actions. polkitd watches this directory and reloads
     # automatically; no scriptlet reload needed.
-    install -Dm644 "$srcdir/$pkgbase/data/org.revenant.policy" \
-        "$pkgdir/usr/share/polkit-1/actions/org.revenant.policy"
+    install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.Revenant.policy" \
+        "$pkgdir/usr/share/polkit-1/actions/dev.sniner.Revenant.policy"
 
     install -Dm644 "$srcdir/$pkgbase/LICENSE" \
         "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

@@ -949,17 +949,19 @@ fn snapshot_row(
         .build();
 
     let restore_btn = gtk::Button::builder()
-        .label("Restore")
-        .css_classes(["pill"])
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Restore snapshot")
+        .css_classes(["flat", "circular"])
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete")
-        .css_classes(["pill", "destructive-action"])
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Delete snapshot")
+        .css_classes(["flat", "circular", "destructive-action"])
         .build();
     if snap.is_live_anchor {
         delete_btn.set_tooltip_text(Some(
-            "This snapshot is the parent of the running system. \
-             Deleting it removes the ★ live-anchor reference; the \
+            "Delete snapshot. This snapshot is the parent of the running \
+             system; deleting it removes the ★ live-anchor reference, the \
              running system itself is unaffected.",
         ));
     }

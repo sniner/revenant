@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Revenant
+GenericName=Snapshot Manager
+Comment=Manage btrfs system snapshots and restore points
+Exec=/usr/bin/revenant-gui
+# TODO: ship a custom icon under /usr/share/icons/hicolor/scalable/apps/
+# dev.sniner.RevenantGui.svg and switch Icon= to dev.sniner.RevenantGui.
+# document-revert is the closest standard-themed match in the meantime
+# (rollback semantic).
+Icon=document-revert
+Terminal=false
+Categories=System;Utility;
+Keywords=snapshot;backup;restore;rollback;btrfs;
+StartupNotify=true
+StartupWMClass=dev.sniner.RevenantGui

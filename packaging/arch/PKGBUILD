@@ -8,11 +8,14 @@
 #   makepkg -f
 #
 # The two resulting .pkg.tar.zst files (revenant + revenant-gui) end
-# up next to this PKGBUILD. The GUI binary is not built yet — the
-# revenant-gui package currently ships only the daemon plus its
-# D-Bus / polkit / systemd integration. Once the GUI is wired up,
-# extend build() to also compile -p revenant-gui and add the binary
-# + .desktop + icon to package_revenant-gui().
+# up next to this PKGBUILD.
+#
+# A custom application icon is still on the TODO list — the .desktop
+# file currently falls back to the standard `document-revert` theme
+# icon. When a proper SVG ships under
+# `data/dev.sniner.RevenantGui.svg`, install it under
+# `/usr/share/icons/hicolor/scalable/apps/` and switch the .desktop
+# `Icon=` line to `dev.sniner.RevenantGui`.
 
 pkgbase=revenant
 pkgname=(revenant revenant-gui)
@@ -21,7 +24,7 @@ pkgrel=1
 arch=('x86_64')
 url='https://github.com/sniner/revenant'
 license=('GPL-3.0-only')
-makedepends=('cargo' 'rust')
+makedepends=('cargo' 'rust' 'gtk4' 'libadwaita')
 # !lto: cargo controls LTO via the release profile; makepkg's lto would fight it.
 # !debug: rust release builds carry no debuginfo, so the -debug subpackage would be empty.
 options=('!lto' '!debug')
@@ -56,12 +59,10 @@ build() {
     # panic messages of std and dependent crates — otherwise makepkg
     # warns "Paket enthält einen Verweis auf $srcdir".
     export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build --remap-path-prefix=$CARGO_HOME=/cargo"
-    # Build only the binaries we ship today. Adding -p revenant-gui will
-    # also pull in gtk4 / libadwaita as build deps, so do that step
-    # together with shipping the GUI binary.
     cargo build --release --frozen \
         -p revenant-cli \
-        -p revenant-daemon
+        -p revenant-daemon \
+        -p revenant-gui
 }
 
 package_revenant() {
@@ -79,13 +80,23 @@ package_revenant() {
 }
 
 package_revenant-gui() {
-    pkgdesc='Privileged D-Bus daemon (and GUI, when ready) for the Revenant snapshot tool'
-    depends=("revenant=$pkgver-$pkgrel" 'dbus' 'polkit')
+    pkgdesc='Privileged D-Bus daemon and GTK4/libadwaita GUI for the Revenant snapshot tool'
+    depends=("revenant=$pkgver-$pkgrel" 'dbus' 'polkit' 'gtk4' 'libadwaita')
     install='revenant-gui.install'
 
     # Daemon binary.
     install -Dm755 "$srcdir/target/release/revenantd" \
         "$pkgdir/usr/bin/revenantd"
+
+    # GUI binary.
+    install -Dm755 "$srcdir/target/release/revenant-gui" \
+        "$pkgdir/usr/bin/revenant-gui"
+
+    # Application launcher entry. Filename matches the GTK App-ID set
+    # in revenant-gui/src/main.rs so desktop environments can
+    # correlate the running window with this .desktop file.
+    install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.RevenantGui.desktop" \
+        "$pkgdir/usr/share/applications/dev.sniner.RevenantGui.desktop"
 
     # systemd unit. /usr/lib/systemd/system is the vendor location;
     # pacman's systemd hook triggers daemon-reload automatically.

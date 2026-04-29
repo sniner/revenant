@@ -1127,16 +1127,18 @@ fn format_short_date(rfc: &str) -> Option<String> {
 /// — keeps row identity, selection, and the ★ suffix in place. Used
 /// when an `Event::AllSnapshots` arrives without a strain-list
 /// change.
+///
+/// `AdwActionRow` is itself a `GtkListBoxRow` subclass (via
+/// `AdwPreferencesRow`), so `row_at_index` returns the action row
+/// directly — downcasting `.child()` would land on the row's
+/// internal layout box and fail silently.
 fn refresh_strain_subtitles(widgets: &Widgets, state: &Rc<RefCell<AppState>>) {
     let st = state.borrow();
     for (idx, strain) in st.strains.iter().enumerate() {
         let Some(row) = widgets.strain_list.row_at_index(idx as i32) else {
             continue;
         };
-        let Some(child) = row.child() else {
-            continue;
-        };
-        let Ok(action_row) = child.downcast::<adw::ActionRow>() else {
+        let Ok(action_row) = row.downcast::<adw::ActionRow>() else {
             continue;
         };
         let subtitle = format_strain_subtitle(strain, st.strain_stats.get(&strain.name));

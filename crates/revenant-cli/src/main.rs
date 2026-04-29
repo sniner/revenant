@@ -331,12 +331,27 @@ fn cmd_snapshot(
     let info = snapshot::create_snapshot(config, backend, toplevel, strain, trigger, message)
         .context("failed to create snapshot")?;
 
-    // Discover once, use for retention
-    let snapshots = snapshot::discover_snapshots(config, backend, toplevel)
-        .context("failed to discover snapshots")?;
-    let retention_removed =
-        revenant_core::cleanup::apply_retention_to(config, backend, toplevel, &snapshots)
-            .context("retention cleanup failed")?;
+    // Auto-apply retention is opt-out via [sys] auto_apply_retention.
+    // When disabled, snapshot creation never deletes anything; the
+    // user is expected to run `revenantctl cleanup` explicitly.
+    let retention_removed = if config.sys.auto_apply_retention {
+        let snapshots = snapshot::discover_snapshots(config, backend, toplevel)
+            .context("failed to discover snapshots")?;
+        let removed =
+            revenant_core::cleanup::apply_retention_to(config, backend, toplevel, &snapshots)
+                .context("retention cleanup failed")?;
+        // Aged-out tombstones are part of the same auto-cleanup pass.
+        let _expired = revenant_core::cleanup::purge_expired_tombstones(
+            config,
+            backend,
+            toplevel,
+            chrono::Utc::now(),
+        )
+        .context("tombstone expiry cleanup failed")?;
+        removed
+    } else {
+        Vec::new()
+    };
 
     output::print_snapshot_created(mode, &info, &retention_removed);
     Ok(())

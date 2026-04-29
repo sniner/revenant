@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
 use crate::backend::{FileSystemBackend, subvol_exists};
@@ -252,6 +253,56 @@ pub fn purge_all_tombstones(
     Ok(removed)
 }
 
+/// Purge tombstones older than `config.sys.tombstone_max_age_days`.
+///
+/// Used as the auto-cleanup pass: an explicit `cleanup` (or any retention
+/// run) drops tombstones that have aged out, while keeping recent ones
+/// available as undo buffers. `tombstone_max_age_days = 0` disables
+/// auto-expiry entirely and the function is a no-op.
+///
+/// Tombstones whose timestamp suffix does not parse as a snapshot id
+/// are kept — we have no way to age them, and a manual review is the
+/// safer outcome.
+///
+/// Per-entry deletion failures are logged and skipped; the function
+/// only fails for global problems (cannot list subvolumes, etc.).
+pub fn purge_expired_tombstones(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    let max_age_days = config.sys.tombstone_max_age_days;
+    if max_age_days == 0 {
+        return Ok(Vec::new());
+    }
+    let cutoff = now - Duration::days(max_age_days as i64);
+
+    let tombstones = list_tombstones(config, backend, toplevel)?;
+    let mut removed = Vec::new();
+    for tombstone in tombstones {
+        let Some(created) = tombstone.id.created_at() else {
+            continue;
+        };
+        if created >= cutoff {
+            continue;
+        }
+        let path = toplevel.join(&tombstone.name);
+        tracing::info!(
+            "cleanup: purging expired tombstone '{}' (older than {max_age_days}d)",
+            tombstone.name
+        );
+        match delete_subvolume_recursive(backend, &path) {
+            Ok(()) => removed.push(tombstone.name),
+            Err(e) => tracing::warn!(
+                "could not delete '{}': {e} (will be retried on next run)",
+                tombstone.name
+            ),
+        }
+    }
+    Ok(removed)
+}
+
 /// Purge specific tombstones by subvolume name.
 ///
 /// Used by the daemon's `PurgeDeleteMarkers` D-Bus method, where the GUI
@@ -491,15 +542,30 @@ pub struct CleanupSummary {
 
 /// Apply per-strain retention policy: keep only the most recent `retain` snapshots per strain.
 ///
-/// Also purges any tombstones left over from previous restores and any
-/// orphaned sidecar metadata files. Discovers snapshots on disk, then
-/// delegates to `apply_retention_to`.
+/// Also purges expired tombstones (older than
+/// `sys.tombstone_max_age_days`) and orphaned sidecar metadata files.
+/// Discovers snapshots on disk, then delegates to `apply_retention_to`.
+///
+/// Thin wrapper around [`apply_retention_with_now`] using `Utc::now()`.
+/// Tests should call the `_with_now` variant with a fixed instant so
+/// the tombstone-age cutoff is deterministic.
 pub fn apply_retention(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<CleanupSummary> {
-    let mut removed = purge_all_tombstones(config, backend, toplevel)?;
+    apply_retention_with_now(config, backend, toplevel, Utc::now())
+}
+
+/// Same as [`apply_retention`] but with an explicit "now" instant for
+/// the tombstone-age cutoff.  Use this in tests.
+pub fn apply_retention_with_now(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+    now: DateTime<Utc>,
+) -> Result<CleanupSummary> {
+    let mut removed = purge_expired_tombstones(config, backend, toplevel, now)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
     removed.extend(apply_retention_to(
         config,
@@ -731,21 +797,72 @@ last = 1
     }
 
     #[test]
-    fn retention_purges_tombstones() {
+    fn retention_purges_expired_tombstones() {
         let config = config_retain_last(&["@"], 5);
         let toplevel = Path::new("/top");
         let mock = setup_mock(&config, toplevel);
 
-        // Pre-existing tombstone (e.g. left over from a prior restore).
+        // Pre-existing tombstone, dated 2026-01-01.
         mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000"));
 
-        let summary = apply_retention(&config, &mock, toplevel).unwrap();
+        // Run retention "now" = 2026-04-01 → tombstone is 90 days old,
+        // well past the 14-day default → must be purged.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let summary = apply_retention_with_now(&config, &mock, toplevel, now).unwrap();
         assert!(
             summary
                 .removed
                 .contains(&"@-DELETE-20260101-120000".to_string())
         );
         assert!(!mock.contains("/top/@-DELETE-20260101-120000"));
+    }
+
+    #[test]
+    fn retention_keeps_recent_tombstones() {
+        // A tombstone newer than `tombstone_max_age_days` must survive
+        // a retention run — that's the whole point of the cooldown.
+        let config = config_retain_last(&["@"], 5);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        // Tombstone dated 2026-01-01; "now" two days later → 2 days
+        // old, well within the 14-day default.
+        mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000"));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-03T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let summary = apply_retention_with_now(&config, &mock, toplevel, now).unwrap();
+        assert!(
+            !summary
+                .removed
+                .contains(&"@-DELETE-20260101-120000".to_string())
+        );
+        assert!(mock.contains("/top/@-DELETE-20260101-120000"));
+    }
+
+    #[test]
+    fn tombstone_max_age_zero_disables_purge() {
+        // `tombstone_max_age_days = 0` is the documented escape hatch
+        // for users who want tombstones to stick around until they
+        // explicitly purge them via the GUI dialog.
+        let mut config = config_retain_last(&["@"], 5);
+        config.sys.tombstone_max_age_days = 0;
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        // A very old tombstone — would be purged at any non-zero
+        // max-age, but must survive at zero.
+        mock.seed_subvolume(toplevel.join("@-DELETE-20200101-120000"));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let summary = apply_retention_with_now(&config, &mock, toplevel, now).unwrap();
+        assert!(summary.removed.is_empty());
+        assert!(mock.contains("/top/@-DELETE-20200101-120000"));
     }
 
     #[test]

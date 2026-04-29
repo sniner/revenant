@@ -7,6 +7,15 @@
 rootfs_subvol = "@"
 # Subvolume where snapshots are stored (created automatically if missing)
 snapshot_subvol = "@snapshots"
+# Apply per-strain retention automatically after `revenantctl snapshot`.
+# When false, snapshot creation never deletes anything; retention runs
+# only when `cleanup` is invoked explicitly.
+auto_apply_retention = true
+# Tombstones (`<base>-DELETE-<ts>` subvols left behind by a previous
+# restore) are auto-removed after this many days as part of any
+# retention run. 0 disables auto-expiry; the GUI's explicit purge
+# dialog still removes tombstones individually.
+tombstone_max_age_days = 14
 
 [sys.rootfs]
 backend = "btrfs"

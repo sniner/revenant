@@ -25,6 +25,20 @@ pub struct SysConfig {
     /// Subvolume where snapshots are stored (e.g. "@snapshots").
     #[serde(default = "default_snapshot_subvol")]
     pub snapshot_subvol: String,
+    /// Whether the per-strain retention policy is applied automatically
+    /// after `revenantctl snapshot` and inside `revenantctl cleanup`.
+    /// When `false`, snapshot creation never deletes anything;
+    /// retention runs only when `cleanup` is invoked explicitly.
+    /// Default: `true` (the historical behaviour).
+    #[serde(default = "default_auto_apply_retention")]
+    pub auto_apply_retention: bool,
+    /// Age (in days) after which tombstones (`<base>-DELETE-<ts>` subvolumes
+    /// left over from earlier restores) are eligible for automatic
+    /// removal during a retention run. `0` disables auto-expiry; the
+    /// GUI's explicit purge dialog still removes tombstones individually.
+    /// Default: `14`.
+    #[serde(default = "default_tombstone_max_age_days")]
+    pub tombstone_max_age_days: u32,
     pub rootfs: RootfsConfig,
     pub efi: EfiConfig,
     pub bootloader: BootloaderConfig,
@@ -36,6 +50,14 @@ fn default_rootfs_subvol() -> String {
 
 fn default_snapshot_subvol() -> String {
     "@snapshots".to_string()
+}
+
+fn default_auto_apply_retention() -> bool {
+    true
+}
+
+fn default_tombstone_max_age_days() -> u32 {
+    14
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

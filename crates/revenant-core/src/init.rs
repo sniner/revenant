@@ -228,6 +228,8 @@ pub fn build_config(detected: DetectedConfig) -> Config {
     let sys = SysConfig {
         rootfs_subvol: rootfs_subvol.clone(),
         snapshot_subvol: "@snapshots".to_string(),
+        auto_apply_retention: true,
+        tombstone_max_age_days: 14,
         rootfs: RootfsConfig {
             backend,
             device_uuid,

@@ -1085,11 +1085,13 @@ fn format_message_items(items: &[String]) -> Option<String> {
     }
 }
 
-/// Build the sidebar subtitle for one strain. Combines:
+/// Build the sidebar subtitle for one strain. Spells the count and
+/// the date out — "3 snapshots · 29.4.26 latest" reads on its own
+/// without the user having to guess what each fragment means.
+/// Combines:
 ///   - the technical identifier (only when display_name is set;
 ///     otherwise the title already is the identifier),
-///   - the per-strain rollup ("6 ∙ 29.4." or "no snapshots yet").
-/// Joined with a thin middle dot ("∙ ") to fit the narrow sidebar.
+///   - the per-strain rollup or "no snapshots yet".
 fn format_strain_subtitle(strain: &Strain, stats: Option<&StrainStats>) -> String {
     let identifier = if strain.display_name.is_some() {
         Some(strain.name.as_str())
@@ -1098,37 +1100,38 @@ fn format_strain_subtitle(strain: &Strain, stats: Option<&StrainStats>) -> Strin
     };
     let rollup = match stats {
         Some(s) if s.count > 0 => {
-            let date = s
-                .latest_iso
-                .as_deref()
-                .and_then(format_short_date)
-                .unwrap_or_default();
-            if date.is_empty() {
-                format!(
-                    "{} snapshot{}",
-                    s.count,
-                    if s.count == 1 { "" } else { "s" }
-                )
+            let unit = if s.count == 1 {
+                "snapshot"
             } else {
-                format!("{} ∙ {}", s.count, date)
+                "snapshots"
+            };
+            let date = s.latest_iso.as_deref().and_then(format_short_date);
+            match date {
+                Some(d) => format!("{} {unit} · {d} latest", s.count),
+                None => format!("{} {unit}", s.count),
             }
         }
         Some(_) | None => "no snapshots yet".to_string(),
     };
     match identifier {
-        Some(id) => format!("{id} ∙ {rollup}"),
+        Some(id) => format!("{id} · {rollup}"),
         None => rollup,
     }
 }
 
 /// Compact short-form of a snapshot timestamp for use in the
-/// sidebar subtitle ("29.4."). Prefers the locale's day-of-month +
-/// month layout via `glib::DateTime`. Returns `None` if the input
-/// is not a valid RFC 3339 string.
+/// sidebar subtitle ("29.4.26"). Day, month, two-digit year — wide
+/// enough to disambiguate across years, narrow enough to fit a
+/// 240-px-class sidebar.
 fn format_short_date(rfc: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(rfc).ok()?;
     let g = glib::DateTime::from_unix_local(parsed.timestamp()).ok()?;
-    Some(format!("{}.{}.", g.day_of_month(), g.month()))
+    Some(format!(
+        "{}.{}.{:02}",
+        g.day_of_month(),
+        g.month(),
+        (g.year() % 100).max(0)
+    ))
 }
 
 /// Walk the existing strain rows and rewrite each subtitle from the

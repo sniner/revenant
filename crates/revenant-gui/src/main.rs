@@ -1556,6 +1556,11 @@ fn present_cleanup_dialog(
              removes the option to roll back to that earlier state. Once \
              removed, they are gone.",
         )
+        // Tombstone subvol names are ~28 chars (`@-DELETE-YYYYMMDD-HHMMSS-mmm`)
+        // and Adwaita's default alert-dialog content width wraps them.
+        // 480 px is enough for the longest tombstone name plus the
+        // checkbox suffix.
+        .content_width(480)
         .build();
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("purge", "Purge selected");

@@ -1565,32 +1565,55 @@ fn present_cleanup_dialog(
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
 
-    // One AdwActionRow per tombstone, with a CheckButton suffix that
-    // doubles as the row's activation widget — clicking anywhere on
-    // the row toggles the checkbox.
-    //
-    // Title is the base subvolume (`@`, `@home`, whatever the user
-    // configured); subtitle is the tombstone's snapshot id and a
-    // human-readable date when parseable. The wire-level subvolume
-    // name (`<base>-DELETE-<id>`) is internal — composed back when
-    // the user confirms — so the user sees structured fields rather
-    // than the cryptic mash-up.
-    let group = adw::PreferencesGroup::builder().build();
+    // Two-column table: subvolume name + snapshot id, with a
+    // checkbox per row. The on-disk subvolume name
+    // (`<base>-DELETE-<id>`) is just a wire-level concatenation —
+    // composing it back when the user confirms is cheaper than
+    // making the user read it. ID is monospace because the
+    // YYYYMMDD-HHMMSS-mmm shape only reads cleanly that way.
+    let grid = gtk::Grid::builder()
+        .row_spacing(6)
+        .column_spacing(18)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+
+    let header_subvol = gtk::Label::builder()
+        .label("Subvol")
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    let header_id = gtk::Label::builder()
+        .label("Snapshot ID")
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    grid.attach(&header_subvol, 0, 0, 1, 1);
+    grid.attach(&header_id, 1, 0, 1, 1);
+
     let mut row_checks: Vec<(String, gtk::CheckButton)> = Vec::with_capacity(tombstones.len());
-    for t in &tombstones {
-        let row = adw::ActionRow::builder().title(&t.base_subvol).build();
-        let subtitle = match format_tombstone_created(t) {
-            Some(date) => format!("{} · {}", t.id, date),
-            None => t.id.clone(),
-        };
-        row.set_subtitle(&subtitle);
+    for (i, t) in tombstones.iter().enumerate() {
+        let r = (i as i32) + 1;
+        let subvol = gtk::Label::builder()
+            .label(&t.base_subvol)
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build();
+        let id = gtk::Label::builder()
+            .label(&t.id)
+            .xalign(0.0)
+            .css_classes(["monospace"])
+            .hexpand(true)
+            .build();
         let check = gtk::CheckButton::builder().active(true).build();
-        row.add_suffix(&check);
-        row.set_activatable_widget(Some(&check));
-        group.add(&row);
+        grid.attach(&subvol, 0, r, 1, 1);
+        grid.attach(&id, 1, r, 1, 1);
+        grid.attach(&check, 2, r, 1, 1);
         row_checks.push((t.name.clone(), check));
     }
-    dialog.set_extra_child(Some(&group));
+    dialog.set_extra_child(Some(&grid));
 
     let widgets_for_cb = widgets.clone();
     let state_for_cb = Rc::clone(state);
@@ -1655,18 +1678,6 @@ fn apply_purge_tombstones_result(
                 .add_toast(adw::Toast::new(&format!("Cleanup failed: {reason}")));
         }
     }
-}
-
-/// Format a tombstone's `created` timestamp for the row subtitle.
-/// Falls back to the raw RFC 3339 if it doesn't parse, then `None` so
-/// the caller drops the date entirely.
-fn format_tombstone_created(t: &Tombstone) -> Option<String> {
-    let rfc = t.created.as_deref()?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(rfc).ok()?;
-    let g = glib::DateTime::from_unix_local(parsed.timestamp()).ok()?;
-    g.format("%e. %B %Y, %H:%M:%S")
-        .ok()
-        .map(|s| s.trim().to_string())
 }
 
 fn apply_delete_snapshot_result(

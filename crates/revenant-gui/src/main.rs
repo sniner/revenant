@@ -684,16 +684,22 @@ fn present_restore_dialog(
             st.restore_in_flight = true;
         }
 
-        let progress_label = if dry_run {
-            "Running preflight checks…"
+        let toast = if dry_run {
+            // Dry-run is fast and never lingers in the auth phase
+            // long enough to need the title swap.
+            let t = adw::Toast::builder()
+                .title("Running preflight checks…")
+                .timeout(0)
+                .build();
+            widgets.toast_overlay.add_toast(t.clone());
+            t
         } else {
-            "Restoring snapshot — waiting for authentication…"
+            show_progress_toast(
+                &widgets.toast_overlay,
+                "Restoring snapshot — waiting for authentication…",
+                "Restoring snapshot…",
+            )
         };
-        let toast = adw::Toast::builder()
-            .title(progress_label)
-            .timeout(0) // 0 = do not auto-dismiss; cleared by RestoreResult
-            .build();
-        widgets.toast_overlay.add_toast(toast.clone());
         state.borrow_mut().restore_progress_toast = Some(toast);
 
         let _ = cmd_tx.send_blocking(Command::Restore {
@@ -1183,6 +1189,33 @@ fn apply_all_snapshots(
     refresh_strain_subtitles(widgets, state);
 }
 
+/// Build an in-flight progress toast that swaps its title from
+/// "<action> — waiting for authentication…" to "<action>…" after a
+/// short delay. The polkit prompt itself disappears as soon as the
+/// user answers it, but the daemon's actual subvolume work can still
+/// take several seconds — without the swap the toast keeps claiming
+/// to wait for authentication that already happened, which reads as
+/// "the GUI hung".
+///
+/// If the result lands before the swap fires, the toast has already
+/// been dismissed and `set_title` is a no-op.
+fn show_progress_toast(
+    overlay: &adw::ToastOverlay,
+    auth_label: &str,
+    working_label: &'static str,
+) -> adw::Toast {
+    let toast = adw::Toast::builder()
+        .title(auth_label)
+        .timeout(0) // 0 = do not auto-dismiss; cleared by the result handler
+        .build();
+    overlay.add_toast(toast.clone());
+    let toast_for_timer = toast.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+        toast_for_timer.set_title(working_label);
+    });
+    toast
+}
+
 /// Render the snapshot's timestamp for display in the row headline.
 /// Uses `glib::DateTime` so the locale's translated month name (`%B`)
 /// kicks in. Falls back to the raw RFC 3339 if it doesn't parse,
@@ -1373,11 +1406,11 @@ fn present_create_snapshot_dialog(
         state_for_cb.borrow_mut().create_in_flight = true;
         widgets_for_cb.strain_btn_create.set_sensitive(false);
 
-        let toast = adw::Toast::builder()
-            .title("Creating snapshot — waiting for authentication…")
-            .timeout(0)
-            .build();
-        widgets_for_cb.toast_overlay.add_toast(toast.clone());
+        let toast = show_progress_toast(
+            &widgets_for_cb.toast_overlay,
+            "Creating snapshot — waiting for authentication…",
+            "Creating snapshot…",
+        );
         state_for_cb.borrow_mut().create_progress_toast = Some(toast);
 
         let _ = cmd_tx_for_cb.send_blocking(Command::CreateSnapshot {
@@ -1473,11 +1506,11 @@ fn present_delete_dialog(
 
         state.borrow_mut().delete_in_flight = true;
 
-        let toast = adw::Toast::builder()
-            .title("Deleting snapshot — waiting for authentication…")
-            .timeout(0)
-            .build();
-        widgets.toast_overlay.add_toast(toast.clone());
+        let toast = show_progress_toast(
+            &widgets.toast_overlay,
+            "Deleting snapshot — waiting for authentication…",
+            "Deleting snapshot…",
+        );
         state.borrow_mut().delete_progress_toast = Some(toast);
 
         let _ = cmd_tx.send_blocking(Command::DeleteSnapshot {
@@ -1634,11 +1667,11 @@ fn present_cleanup_dialog(
         state_for_cb.borrow_mut().purge_in_flight = true;
         widgets_for_cb.header_btn_cleanup.set_sensitive(false);
 
-        let toast = adw::Toast::builder()
-            .title("Purging pre-restore states — waiting for authentication…")
-            .timeout(0)
-            .build();
-        widgets_for_cb.toast_overlay.add_toast(toast.clone());
+        let toast = show_progress_toast(
+            &widgets_for_cb.toast_overlay,
+            "Purging pre-restore states — waiting for authentication…",
+            "Purging pre-restore states…",
+        );
         state_for_cb.borrow_mut().purge_progress_toast = Some(toast);
 
         let _ = cmd_tx_for_cb.send_blocking(Command::PurgeTombstones(selected));

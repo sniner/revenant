@@ -90,6 +90,10 @@ struct Widgets {
     snapshot_scroll: gtk::ScrolledWindow,
     snapshot_empty: adw::StatusPage,
     snapshot_error: adw::StatusPage,
+    /// Title label on the right pane — shows the currently-selected
+    /// strain name (display_name preferred, identifier as fallback).
+    /// Empty string before the first selection lands.
+    content_title: gtk::Label,
     /// Calendar button on the content toolbar — opens the retention
     /// editor for the currently-selected strain.
     strain_btn_retention: gtk::Button,
@@ -245,17 +249,38 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
+    // Sidebar gets a small "Strains" heading at the top so the
+    // column has a recognisable identity — without it, users see a
+    // bare list and have to deduce what they're looking at.
+    let sidebar_title = gtk::Label::builder()
+        .label("Strains")
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .margin_top(12)
+        .margin_bottom(6)
+        .margin_start(18)
+        .margin_end(18)
+        .build();
+
     let sidebar = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
+    sidebar.append(&sidebar_title);
     sidebar.append(&strain_scroll);
 
-    // ---- content pane (slim toolbar + snapshot list) ----------------
+    // ---- content pane (title + slim toolbar + snapshot list) --------
 
-    // Strain-scoped action buttons: calendar = retention editor,
-    // `+` = create snapshot. The previous title label was redundant
-    // — the strain is already highlighted in the sidebar — so the
-    // toolbar is buttons-only, right-aligned via a hexpand spacer.
+    // Right pane gets a heading line: the currently-selected strain
+    // name on the left, action buttons (retention editor + create
+    // snapshot) on the right. The label is set in apply_snapshots
+    // when a strain is chosen.
+    let content_title = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .hexpand(true)
+        .css_classes(["title-3"])
+        .build();
+
     let strain_btn_retention = gtk::Button::builder()
         .icon_name("x-office-calendar-symbolic")
         .tooltip_text("Edit retention")
@@ -275,11 +300,7 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         .margin_start(18)
         .margin_end(18)
         .build();
-    let spacer = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .hexpand(true)
-        .build();
-    toolbar.append(&spacer);
+    toolbar.append(&content_title);
     toolbar.append(&strain_btn_retention);
     toolbar.append(&strain_btn_create);
 
@@ -355,6 +376,7 @@ fn build_main_ui(root_stack: &gtk::Stack) -> Widgets {
         snapshot_scroll,
         snapshot_empty,
         snapshot_error,
+        content_title,
         strain_btn_retention,
         strain_btn_create,
     }
@@ -804,13 +826,19 @@ fn apply_strains(
 }
 
 fn select_strain(state: &Rc<RefCell<AppState>>, widgets: &Widgets, name: &str) {
-    {
+    let title = {
         let mut st = state.borrow_mut();
         st.selected_strain = Some(name.to_string());
         // Drop the previous strain's snapshots so a stray late
         // selection callback can't index into a stale list.
         st.snapshots.clear();
-    }
+        st.strains
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.title().to_string())
+            .unwrap_or_else(|| name.to_string())
+    };
+    widgets.content_title.set_label(&title);
     widgets.snapshot_stack.set_visible_child_name("loading");
 }
 

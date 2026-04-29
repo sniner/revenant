@@ -999,11 +999,11 @@ fn snapshot_row(
 
     let body = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .margin_top(8)
-        .margin_bottom(8)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(4)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(16)
+        .margin_end(16)
         .build();
     body.append(&headline);
     if kv.first_child().is_some() {

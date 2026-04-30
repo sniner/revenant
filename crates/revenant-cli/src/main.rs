@@ -168,8 +168,8 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             save_current,
         ),
         cli::Command::Delete { target } => cmd_delete(mode, &config, &backend, &toplevel, &target),
-        cli::Command::Cleanup { dry_run } => {
-            cmd_cleanup(mode, &config, &backend, &toplevel, dry_run)
+        cli::Command::Cleanup { dry_run, force } => {
+            cmd_cleanup(mode, &config, &backend, &toplevel, dry_run, force)
         }
         cli::Command::Status => cmd_status(mode, &config, &backend, &toplevel),
         cli::Command::Init { .. } | cli::Command::Check => unreachable!(),
@@ -531,9 +531,10 @@ fn cmd_cleanup(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     dry_run: bool,
+    force: bool,
 ) -> Result<()> {
     if dry_run {
-        let plan = revenant_core::cleanup::plan_retention(config, backend, toplevel)
+        let plan = revenant_core::cleanup::plan_retention(config, backend, toplevel, force)
             .context("cleanup dry-run failed")?;
         output::print_retention_plan(mode, &plan);
         return Ok(());
@@ -541,8 +542,12 @@ fn cmd_cleanup(
 
     recover_pending_orphans(mode, config, backend, toplevel)?;
 
-    let summary = revenant_core::cleanup::apply_retention(config, backend, toplevel)
-        .context("cleanup failed")?;
+    let summary = if force {
+        revenant_core::cleanup::apply_retention_force(config, backend, toplevel)
+    } else {
+        revenant_core::cleanup::apply_retention(config, backend, toplevel)
+    }
+    .context("cleanup failed")?;
 
     output::print_cleanup_result(mode, &summary);
 

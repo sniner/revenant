@@ -143,6 +143,12 @@ pub enum Command {
         /// kept snapshot, plus any DELETE markers that would be purged.
         #[arg(short = 'n', long)]
         dry_run: bool,
+        /// Purge every DELETE marker now, ignoring `tombstone_max_age_days`.
+        /// Per-strain retention rules are still honoured — `--force`
+        /// only bypasses the tombstone undo window.  Combine with
+        /// `--dry-run` to preview the forced purge.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
     /// Show configuration and filesystem status
     Status,

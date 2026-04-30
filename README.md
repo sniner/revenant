@@ -1,11 +1,11 @@
 > [!WARNING]
-> **Beta software.** Revenant has been used daily on multiple systems (a VM, a notebook,
-> a Gnome desktop VM) over a stretch of weeks without an incident, and is no longer
-> "early development". That said, it is a tool that renames live subvolumes and rewrites
-> ESP contents — bugs at this stage can still leave a system unbootable or destroy data.
-> Treat it as beta software on a production system and **always keep an independent
-> backup**. If you would rather not take that risk, run revenant in a VM until tagged
-> releases stabilise the on-disk layout and the public APIs.
+> **Beta software.** Revenant has been in daily use on a handful of systems for
+> several weeks without an incident, and is no longer "early development". That
+> said, it is a tool that renames live subvolumes and rewrites ESP contents —
+> bugs at this stage can still leave a system unbootable or destroy data. Treat
+> it as beta software on a production system and **always keep an independent
+> backup**. If you would rather not take that risk, run revenant in a VM until
+> tagged releases stabilise the on-disk layout and the public APIs.
 
 # revenant
 
@@ -61,14 +61,21 @@ be disabled entirely and revenant runs as a rootfs-only snapshot tool.
 
 ### Snapshot naming
 
-Snapshots follow the pattern `{subvol}-{strain}-{timestamp}`, e.g. `@-default-20260316-143022`.
-All information lives in the subvolume name itself — no separate database required.
+Snapshots follow the pattern `{subvol}-{strain}-{timestamp}`, e.g.
+`@-default-20260316-143022-456`. The timestamp is `YYYYMMDD-HHMMSS-mmm` UTC
+with a millisecond suffix; older 15-character IDs without the suffix
+remain readable. The subvolume name carries the snapshot's identity —
+strain, exact creation moment, and source subvolume — so there is no
+central snapshot database. Optional per-snapshot metadata is stored
+next to the subvolume as a TOML sidecar (see below) and is strictly
+additive.
 
 ### Snapshot metadata
 
 Alongside each snapshot, revenant writes an optional TOML sidecar
-`{strain}-{timestamp}.meta.toml` in the snapshot subvolume that records
-*why* the snapshot exists:
+`{strain}-{timestamp}.meta.toml` in the snapshot directory (e.g.
+`@snapshots/`, next to the snapshot subvolumes themselves) that
+records *why* the snapshot exists:
 
 - A free-form `--message` supplied by the user on manual snapshots.
 - The trigger kind (`manual`, `pacman`, `systemd-boot`, `systemd-periodic`,
@@ -100,14 +107,18 @@ define multiple strains for different purposes (e.g. `default` for manual snapsh
 ### Retention
 
 Each strain defines its own retention policy (`last`, `hourly`, `daily`, …).
-Retention is applied **automatically** every time a new snapshot is created —
-there is no need to run a separate cleanup step to enforce it.
+By default retention is applied automatically every time a new snapshot
+is created (`sys.auto_apply_retention = true`). Set it to `false` if you
+want snapshot creation to never delete anything; retention then runs
+only when you invoke `revenantctl cleanup` explicitly.
 
-`revenantctl cleanup` serves a different purpose: it removes the old live
-subvolumes (DELETE markers) left behind after a restore, and sweeps up any
-orphaned metadata sidecars whose snapshot subvolume is gone.  Run it once
-you are satisfied with the result of a restore and no longer need the
-pre-restore state as a fallback.
+`revenantctl cleanup` does three things in one pass: apply per-strain
+retention, expire DELETE markers older than `sys.tombstone_max_age_days`
+(default 14 days; see *Restore and the DELETE marker* below), and sweep
+up orphaned metadata sidecars whose snapshot subvolume is gone. Pass
+`--dry-run` to preview the plan, or `--force` to skip the DELETE-marker
+undo window and purge every marker right away (per-strain retention is
+still honoured — `--force` only bypasses the tombstone cooldown).
 
 ### Restore and the DELETE marker
 
@@ -117,17 +128,28 @@ makes the user's acknowledgement a single explicit step without requiring an
 interactive prompt (so it is still script-friendly via `--yes`).
 
 A restore renames the current live subvolume to `{subvol}-DELETE-{ts}` and
-creates a fresh writable copy from the chosen snapshot in its place. The renamed
-subvolume is **not** purged immediately — it survives boot-time snapshots and
-periodic timer snapshots until the next `revenantctl cleanup` or the next
-restore. That makes it a volatile undo buffer for the previous live state: if
-you need a file from the pre-restore system after rebooting, it is still there,
-writable, at the top level of the btrfs filesystem. If you want a retained,
-strain-integrated copy of the current state instead of (or in addition to) the
-volatile DELETE marker, pass `--save-current` to `restore`: it captures the
-pre-restore state as a snapshot in the target strain (tagged with the `restore`
-trigger kind) just before the rollback, so you have a named, retention-managed
-point to return to.
+creates a fresh writable copy from the chosen snapshot in its place. The
+renamed subvolume is **not** purged immediately: it lives at the top level of
+the btrfs filesystem as a volatile undo buffer for the previous live state. If
+you need a file from the pre-restore system after rebooting, it is still
+there, writable, until it ages out.
+
+DELETE markers expire automatically `sys.tombstone_max_age_days` days after
+they were created (default 14 days); the next retention pass — whether
+triggered by `revenantctl snapshot` with `auto_apply_retention = true` or by
+an explicit `revenantctl cleanup` — drops every DELETE marker older than
+that. Recent markers survive the routine cleanup, so the undo buffer is
+actually available when you need it. To skip the cooldown and purge every
+marker now, run `revenantctl cleanup --force`. Setting
+`sys.tombstone_max_age_days = 0` disables auto-expiry entirely; markers then
+stay until you remove them explicitly (`cleanup --force`, or the GUI's
+review dialog).
+
+If you want a retained, strain-integrated copy of the current state instead
+of (or in addition to) the volatile DELETE marker, pass `--save-current` to
+`restore`: it captures the pre-restore state as a snapshot in the target
+strain (tagged with the `restore` trigger kind) just before the rollback, so
+you have a named, retention-managed point to return to.
 
 After a restore, `revenantctl list` marks the snapshot that the current live
 subvolume was cloned from with a leading `*`, so the rollback anchor is always
@@ -241,7 +263,7 @@ Commands:
   list      List all snapshots (optionally filter by strain)
   restore   Restore a snapshot by ID
   delete    Delete a snapshot or all snapshots of a strain
-  cleanup   Remove old live subvolumes and orphaned metadata sidecars
+  cleanup   Apply retention policy and remove old snapshots
   status    Show configuration and filesystem status
   check     Run system health checks
 ```
@@ -264,7 +286,7 @@ The rough shape per command is:
 | `restore` (`--yes`) | `{"restored": {"id","strain"}, "pre_restore_snapshot"?: {"id","strain"}, "reboot_required": true}` |
 | `restore` (refusal) | `{"would_restore": {…}, "subvolumes": […], "efi_sync": bool, "proceed_with": "--yes"}`, exit 1 |
 | `cleanup` | `{"removed": [id, …], "removed_sidecars": [name, …]}` |
-| `cleanup --dry-run` | the full `RetentionPlan` — per-strain keep/delete entries plus any DELETE markers |
+| `cleanup --dry-run` | the full `RetentionPlan` — per-strain keep/delete entries plus every DELETE marker, each tagged with `would_purge` and `expires_at` |
 | `check` | `{"findings": [{"severity","check","message","hint"?}, …], "summary": {"errors","warnings","infos"}}` |
 | `init` | `{"tasks": [{"task": "detected-system" \| "wrote-config" \| "added-systemd-strains" \| "wrote-systemd-unit" \| "added-pkgmgr-strain" \| "wrote-pkgmgr-hook", …}, …]}` |
 
@@ -294,9 +316,9 @@ sudo revenantctl snapshot --message "before risky experiment"
 revenantctl list
 
 # Restore a specific snapshot (prints what would happen and exits with code 1)
-sudo revenantctl restore 20260316-143022
+sudo revenantctl restore 20260316-143022-456
 # Re-run with --yes to actually perform the restore
-sudo revenantctl restore 20260316-143022 --yes
+sudo revenantctl restore 20260316-143022-456 --yes
 ```
 
 ### Systemd integration
@@ -427,6 +449,14 @@ informational notice so you can make a conscious decision about where state live
 [sys]
 rootfs_subvol = "@"
 snapshot_subvol = "@snapshots"
+# Apply per-strain retention automatically after `revenantctl snapshot`.
+# When false, snapshot creation never deletes anything; retention runs
+# only when `cleanup` is invoked explicitly.
+auto_apply_retention = true
+# DELETE markers (`<base>-DELETE-<ts>` subvols left behind by a previous
+# restore) auto-expire after this many days as part of any retention
+# run. 0 disables auto-expiry; `cleanup --force` always purges them.
+tombstone_max_age_days = 14
 
 [sys.rootfs]
 backend = "btrfs"
@@ -448,6 +478,9 @@ efi = true
 last = 5
 daily = 7
 ```
+
+The annotated, field-by-field reference is in
+[`config/revenant.toml.example`](config/revenant.toml.example).
 
 ## Requirements
 

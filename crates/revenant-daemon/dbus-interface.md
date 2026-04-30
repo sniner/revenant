@@ -183,6 +183,7 @@ PurgeDeleteMarkers(names: as) -> (as)           -- privileged: dev.sniner.Revena
 | `base_subvol`  | `s`  | The live subvol this was renamed from (`"@"`, `"@home"`).|
 | `id`           | `s`  | Snapshot id encoded in the marker's timestamp suffix.    |
 | `created`      | `s`  | RFC 3339 timestamp parsed from `id`. Omitted if unparseable. |
+| `expires_at`   | `s`  | RFC 3339 wall-clock when the next retention run would auto-purge this marker (`created + sys.tombstone_max_age_days`). Omitted when auto-expiry is disabled (`tombstone_max_age_days = 0`) or the timestamp suffix is unparseable. |
 
 Names that no longer match a live marker are silently skipped from the
 returned set — a concurrent CLI cleanup may have purged them between

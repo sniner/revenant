@@ -86,6 +86,9 @@ pub fn tombstone_to_dict(t: &Tombstone) -> DaemonResult<Dict> {
     if let Some(ts) = t.id.created_at() {
         insert_str(&mut d, "created", &ts.to_rfc3339())?;
     }
+    if let Some(e) = t.expires_at {
+        insert_str(&mut d, "expires_at", &e.to_rfc3339())?;
+    }
     Ok(d)
 }
 

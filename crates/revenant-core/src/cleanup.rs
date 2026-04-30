@@ -20,10 +20,12 @@ use crate::snapshot::{self, SnapshotId, SnapshotInfo};
 pub struct RetentionPlan {
     /// One entry per configured strain, sorted by strain name for stable output.
     pub strains: Vec<StrainPlan>,
-    /// Structured view of any tombstones (`<base>-DELETE-<ts>` subvols)
-    /// that a real cleanup run would purge.  May be empty.
+    /// Structured view of every tombstone (`<base>-DELETE-<ts>` subvol)
+    /// at the top level, each annotated with whether the next live
+    /// retention run would purge it now (`would_purge`) or carry it as
+    /// an undo buffer until `expires_at`.  May be empty.
     #[serde(rename = "delete_markers")]
-    pub tombstones: Vec<Tombstone>,
+    pub tombstones: Vec<PlanTombstone>,
 }
 
 /// A tombstone — a parsed `<base>-DELETE-<ts>` subvolume.
@@ -47,6 +49,26 @@ pub struct Tombstone {
     pub id: SnapshotId,
     /// Full subvolume name, e.g. `"@-DELETE-20260411-080055"`.
     pub name: String,
+    /// Wall-clock at which this tombstone ages out and becomes eligible
+    /// for auto-purge by the next retention run — `created_at +
+    /// sys.tombstone_max_age_days`.  `None` when auto-expiry is
+    /// disabled (`tombstone_max_age_days = 0`) or the timestamp suffix
+    /// could not be parsed.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// A [`Tombstone`] decorated with the live cleanup decision derived
+/// from a specific "now": `would_purge = true` iff `expires_at` is set
+/// and already in the past.  Used inside [`RetentionPlan`] so JSON
+/// consumers and the CLI text renderer can split the dry-run report
+/// into "pending purge" vs. "kept (within undo window)" without
+/// needing to know the comparison instant themselves.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanTombstone {
+    #[serde(flatten)]
+    pub tombstone: Tombstone,
+    /// Would the next live retention run purge this tombstone right now?
+    pub would_purge: bool,
 }
 
 /// Retention plan for a single strain.
@@ -207,13 +229,17 @@ pub fn recover_orphaned_nested_subvols(
 /// Delete all tombstones (`<base>-DELETE-<ts>` subvols) across all
 /// configured subvol names.
 ///
-/// Called automatically by `apply_retention` (i.e. `revenantctl cleanup`).
-/// `create_snapshot` deliberately does *not* call this any more:
-/// tombstones are the volatile undo buffer for the previous live state
-/// after a restore, and purging them on every boot-time snapshot would
-/// defeat that purpose.  Failures per entry are logged as warnings; the
-/// function always succeeds so that a mounted subvolume (live root
-/// before reboot) does not block normal operation.
+/// Bulk variant of the auto-expiry pass — kept for tests and for
+/// future tooling that needs a "wipe every undo buffer" hammer.  The
+/// `cleanup` command no longer calls this directly; it goes through
+/// `purge_expired_tombstones`, which honours `tombstone_max_age_days`
+/// and leaves recent undo buffers in place.  `create_snapshot` also
+/// does not call this — tombstones are the volatile undo buffer for
+/// the previous live state after a restore, and purging them on every
+/// boot-time snapshot would defeat that purpose.  Failures per entry
+/// are logged as warnings; the function always succeeds so that a
+/// mounted subvolume (live root before reboot) does not block normal
+/// operation.
 pub fn purge_all_tombstones(
     config: &Config,
     backend: &dyn FileSystemBackend,
@@ -408,6 +434,8 @@ pub fn list_tombstones(
         base_names.insert(config.sys.efi.staging_subvol.as_str());
     }
 
+    let max_age_days = config.sys.tombstone_max_age_days;
+
     let all_subvols = backend.list_subvolumes(toplevel)?;
     let mut tombstones = Vec::new();
     for entry in all_subvols {
@@ -421,11 +449,20 @@ pub fn list_tombstones(
             continue;
         };
         match SnapshotId::from_string(suffix) {
-            Ok(id) => tombstones.push(Tombstone {
-                base_subvol: base.to_string(),
-                id,
-                name: name.to_string(),
-            }),
+            Ok(id) => {
+                let expires_at = if max_age_days == 0 {
+                    None
+                } else {
+                    id.created_at()
+                        .map(|c| c + Duration::days(i64::from(max_age_days)))
+                };
+                tombstones.push(Tombstone {
+                    base_subvol: base.to_string(),
+                    id,
+                    name: name.to_string(),
+                    expires_at,
+                });
+            }
             Err(_) => {
                 tracing::warn!(
                     "skipping tombstone '{name}' in dry-run report: timestamp suffix '{suffix}' is not a valid snapshot ID"
@@ -440,14 +477,30 @@ pub fn list_tombstones(
 /// Compute — without modifying anything on disk — what `apply_retention`
 /// would do.  Returns a [`RetentionPlan`] that enumerates every snapshot
 /// per configured strain with a keep/delete decision (plus the reasons
-/// protecting a kept snapshot) and lists any tombstones that would be
-/// purged.
+/// protecting a kept snapshot) and every tombstone, each annotated with
+/// whether the next live retention run would purge it now or carry it
+/// as an undo buffer until it ages out.
 ///
 /// This is the engine behind `revenantctl cleanup --dry-run`.
+///
+/// Thin wrapper around [`plan_retention_with_now`] using `Utc::now()`.
+/// Tests should call the `_with_now` variant with a fixed instant so
+/// the tombstone-age cutoff is deterministic.
 pub fn plan_retention(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
+) -> Result<RetentionPlan> {
+    plan_retention_with_now(config, backend, toplevel, Utc::now())
+}
+
+/// Same as [`plan_retention`] but with an explicit "now" instant for
+/// the `would_purge` decision on each tombstone.  Use this in tests.
+pub fn plan_retention_with_now(
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+    now: DateTime<Utc>,
 ) -> Result<RetentionPlan> {
     let tombstones = list_tombstones(config, backend, toplevel)?;
     let all_snapshots = snapshot::discover_snapshots(config, backend, toplevel)?;
@@ -489,6 +542,19 @@ pub fn plan_retention(
             entries,
         });
     }
+
+    // Match the live cleanup predicate: `purge_expired_tombstones`
+    // purges when `created < now - max_age_days`, i.e. `expires_at < now`.
+    let tombstones = tombstones
+        .into_iter()
+        .map(|t| {
+            let would_purge = t.expires_at.is_some_and(|e| e < now);
+            PlanTombstone {
+                tombstone: t,
+                would_purge,
+            }
+        })
+        .collect();
 
     Ok(RetentionPlan {
         strains,
@@ -981,10 +1047,10 @@ last = 1
 
         let plan = plan_retention(&config, &mock, toplevel).unwrap();
         assert_eq!(plan.tombstones.len(), 1);
-        let tombstone = &plan.tombstones[0];
-        assert_eq!(tombstone.name, "@-DELETE-20260101-120000");
-        assert_eq!(tombstone.base_subvol, "@");
-        assert_eq!(tombstone.id.as_str(), "20260101-120000");
+        let pt = &plan.tombstones[0];
+        assert_eq!(pt.tombstone.name, "@-DELETE-20260101-120000");
+        assert_eq!(pt.tombstone.base_subvol, "@");
+        assert_eq!(pt.tombstone.id.as_str(), "20260101-120000");
         // Dry run: tombstone still present on disk.
         assert!(mock.contains("/top/@-DELETE-20260101-120000"));
     }
@@ -1006,7 +1072,74 @@ last = 1
         let plan = plan_retention(&config, &mock, toplevel).unwrap();
         // Only the well-formed one shows up.
         assert_eq!(plan.tombstones.len(), 1);
-        assert_eq!(plan.tombstones[0].name, "@-DELETE-20260101-120000");
+        assert_eq!(
+            plan.tombstones[0].tombstone.name,
+            "@-DELETE-20260101-120000"
+        );
+    }
+
+    #[test]
+    fn plan_splits_tombstones_by_age() {
+        // Plan must mirror the live cleanup predicate: tombstones older
+        // than `tombstone_max_age_days` get `would_purge = true`,
+        // recent ones stay as undo buffers.  Regression test for the
+        // 0.2.0 bug where the dry-run listed every tombstone as
+        // "pending purge" while the live run only purged expired ones.
+        let config = config_retain_last(&["@"], 5);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        // Two tombstones, default `tombstone_max_age_days = 14`.
+        mock.seed_subvolume(toplevel.join("@-DELETE-20260101-120000")); // very old
+        mock.seed_subvolume(toplevel.join("@-DELETE-20260428-120000")); // 3 days old at "now" below
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let plan = plan_retention_with_now(&config, &mock, toplevel, now).unwrap();
+        assert_eq!(plan.tombstones.len(), 2);
+
+        // Sorted alphabetically: the January tombstone first.
+        assert_eq!(
+            plan.tombstones[0].tombstone.name,
+            "@-DELETE-20260101-120000"
+        );
+        assert!(plan.tombstones[0].would_purge);
+        assert!(plan.tombstones[0].tombstone.expires_at.is_some());
+
+        assert_eq!(
+            plan.tombstones[1].tombstone.name,
+            "@-DELETE-20260428-120000"
+        );
+        assert!(!plan.tombstones[1].would_purge);
+        assert!(
+            plan.tombstones[1]
+                .tombstone
+                .expires_at
+                .is_some_and(|e| e > now)
+        );
+    }
+
+    #[test]
+    fn plan_max_age_zero_keeps_all_tombstones() {
+        // `tombstone_max_age_days = 0` disables auto-expiry — `expires_at`
+        // is `None` for all, `would_purge` is `false` for all.
+        let mut config = config_retain_last(&["@"], 5);
+        config.sys.tombstone_max_age_days = 0;
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+
+        mock.seed_subvolume(toplevel.join("@-DELETE-20200101-120000"));
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let plan = plan_retention_with_now(&config, &mock, toplevel, now).unwrap();
+        assert_eq!(plan.tombstones.len(), 1);
+        assert!(plan.tombstones[0].tombstone.expires_at.is_none());
+        assert!(!plan.tombstones[0].would_purge);
     }
 
     // ----- purge_all_tombstones -----

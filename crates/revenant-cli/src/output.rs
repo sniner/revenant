@@ -288,21 +288,46 @@ pub fn print_retention_plan(mode: OutputMode, plan: &RetentionPlan) {
         println!();
     }
 
-    if !plan.tombstones.is_empty() {
+    let (to_purge, kept): (Vec<_>, Vec<_>) = plan.tombstones.iter().partition(|t| t.would_purge);
+
+    if !to_purge.is_empty() {
         println!("DELETE markers (pending purge):");
-        for tombstone in &plan.tombstones {
-            println!("  {}", tombstone.name);
+        for pt in &to_purge {
+            println!("  {}", pt.tombstone.name);
         }
         println!();
     }
 
-    let tombstone_count = plan.tombstones.len();
-    if tombstone_count == 0 {
+    if !kept.is_empty() {
+        println!("DELETE markers (kept — within undo window):");
+        for pt in &kept {
+            match pt.tombstone.expires_at {
+                Some(e) => {
+                    println!(
+                        "  {:<29}   ages out {}",
+                        pt.tombstone.name,
+                        e.format("%Y-%m-%d")
+                    );
+                }
+                None => {
+                    // expires_at = None ⇒ tombstone_max_age_days = 0
+                    // (auto-expiry disabled).  Same for every kept entry,
+                    // but spelling it per-row keeps the output stable
+                    // even if a future config grows mixed semantics.
+                    println!("  {:<29}   auto-expiry disabled", pt.tombstone.name);
+                }
+            }
+        }
+        println!();
+    }
+
+    let purge_count = to_purge.len();
+    let kept_count = kept.len();
+    if purge_count == 0 && kept_count == 0 {
         println!("Summary: {total_kept} kept, {total_delete} to delete");
     } else {
-        let plural = if tombstone_count == 1 { "" } else { "s" };
         println!(
-            "Summary: {total_kept} kept, {total_delete} to delete, {tombstone_count} delete marker{plural}"
+            "Summary: {total_kept} kept, {total_delete} to delete, {purge_count} delete marker(s) to purge, {kept_count} kept"
         );
     }
 }

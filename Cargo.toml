@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Stefan Schönberger <stefan@sniner.dev>"]
 license = "GPL-3.0-only"
 rust-version = "1.85"

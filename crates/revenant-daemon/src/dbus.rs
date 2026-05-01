@@ -111,10 +111,7 @@ impl Daemon {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> Result<(), DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(conn, sender.as_str(), "dev.sniner.Revenant.config.edit").await?;
+        authorize(conn, &hdr, "dev.sniner.Revenant.config.edit", None).await?;
 
         // Validate the strain exists before we touch the file.
         {
@@ -212,14 +209,13 @@ impl Daemon {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<Dict, DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        let action = "dev.sniner.Revenant.snapshot.create";
-        polkit::check(conn, sender.as_str(), action).await?;
-        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
-            tracing::warn!("emit OperationStarted({action}): {e}");
-        }
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.snapshot.create",
+            Some(&signal_emitter),
+        )
+        .await?;
 
         let ready = self.state.ready().await?;
         let info = core_create_snapshot(
@@ -244,14 +240,13 @@ impl Daemon {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<(), DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        let action = "dev.sniner.Revenant.snapshot.delete";
-        polkit::check(conn, sender.as_str(), action).await?;
-        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
-            tracing::warn!("emit OperationStarted({action}): {e}");
-        }
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.snapshot.delete",
+            Some(&signal_emitter),
+        )
+        .await?;
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
@@ -292,15 +287,7 @@ impl Daemon {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
     ) -> Result<Dict, DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        polkit::check(
-            conn,
-            sender.as_str(),
-            "dev.sniner.Revenant.snapshot.protect",
-        )
-        .await?;
+        authorize(conn, &hdr, "dev.sniner.Revenant.snapshot.protect", None).await?;
 
         let ready = self.state.ready().await?;
         let snap_id = SnapshotId::from_string(id)
@@ -364,14 +351,13 @@ impl Daemon {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<Vec<String>, DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        let action = "dev.sniner.Revenant.cleanup";
-        polkit::check(conn, sender.as_str(), action).await?;
-        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
-            tracing::warn!("emit OperationStarted({action}): {e}");
-        }
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.cleanup",
+            Some(&signal_emitter),
+        )
+        .await?;
 
         let ready = self.state.ready().await?;
         let removed = purge_tombstones_by_name(
@@ -414,14 +400,13 @@ impl Daemon {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
     ) -> Result<Dict, DaemonError> {
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
-        let action = "dev.sniner.Revenant.restore";
-        polkit::check(conn, sender.as_str(), action).await?;
-        if let Err(e) = Self::operation_started(&signal_emitter, action).await {
-            tracing::warn!("emit OperationStarted({action}): {e}");
-        }
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.restore",
+            Some(&signal_emitter),
+        )
+        .await?;
 
         let save_current = read_bool_opt(&options, "save_current").unwrap_or(true);
         let dry_run = read_bool_opt(&options, "dry_run").unwrap_or(false);
@@ -562,6 +547,31 @@ impl Daemon {
         ctxt: &zbus::object_server::SignalEmitter<'_>,
         operation: &str,
     ) -> zbus::Result<()>;
+}
+
+/// Polkit-authorise the caller of a privileged D-Bus method and,
+/// when `announce` is `Some`, emit `OperationStarted(action)` so the
+/// GUI can swap a "waiting for authentication…" toast to "<action>…"
+/// without waiting on the actual work to return. A failed signal
+/// emit is logged but not propagated — the work has already been
+/// authorised at that point and the user-visible signal-loss is
+/// strictly cosmetic.
+async fn authorize(
+    conn: &zbus::Connection,
+    hdr: &zbus::message::Header<'_>,
+    action: &str,
+    announce: Option<&zbus::object_server::SignalEmitter<'_>>,
+) -> Result<(), DaemonError> {
+    let sender = hdr
+        .sender()
+        .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
+    polkit::check(conn, sender.as_str(), action).await?;
+    if let Some(emitter) = announce
+        && let Err(e) = Daemon::operation_started(emitter, action).await
+    {
+        tracing::warn!("emit OperationStarted({action}): {e}");
+    }
+    Ok(())
 }
 
 /// Map a `revenant-core` error onto the closest custom D-Bus error.

@@ -537,6 +537,7 @@ fn apply_event(
             widgets
                 .header_status_icon
                 .set_tooltip_text(Some(&format!("Daemon error: {reason}")));
+            show_error_toast(&widgets.toast_overlay, "Daemon info unavailable", &reason);
         }
         Event::Strains(Ok(list)) => {
             apply_strains(widgets, state, cmd_tx, list);
@@ -552,6 +553,7 @@ fn apply_event(
             tracing::warn!("ListStrains failed: {reason}");
             widgets.snapshot_error.set_description(Some(&reason));
             widgets.snapshot_stack.set_visible_child_name("error");
+            show_error_toast(&widgets.toast_overlay, "Could not load strains", &reason);
         }
         Event::LiveParent(Ok(lp)) => {
             // Stash the live parent so the next strain-row rebuild
@@ -1118,6 +1120,16 @@ fn snapshot_row(
     row
 }
 
+/// Surface a query-failure on the toast overlay. Privileged operations
+/// (Restore/Delete/Create/Protect/Cleanup) build their own toasts with
+/// operation-specific phrasing; this helper exists for the read-only
+/// RPCs (`GetDaemonInfo`, `ListStrains`, `ListSnapshots`,
+/// `ListDeleteMarkers`) so a stale UI does not silently mask a backend
+/// error.
+fn show_error_toast(overlay: &adw::ToastOverlay, summary: &str, reason: &str) {
+    overlay.add_toast(adw::Toast::new(&format!("{summary}: {reason}")));
+}
+
 fn kv_pair(key: &str, value: &str) -> gtk::Box {
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -1228,6 +1240,11 @@ fn apply_all_snapshots(
             tracing::warn!("ListSnapshots(filter={{}}) failed: {reason}");
             state.borrow_mut().strain_stats.clear();
             refresh_strain_subtitles(widgets, state);
+            show_error_toast(
+                &widgets.toast_overlay,
+                "Could not refresh snapshot stats",
+                &reason,
+            );
             return;
         }
     };
@@ -1628,6 +1645,11 @@ fn apply_tombstones(
         Ok(t) => t,
         Err(reason) => {
             tracing::warn!("ListDeleteMarkers failed: {reason}");
+            show_error_toast(
+                &widgets.toast_overlay,
+                "Could not load pre-restore states",
+                &reason,
+            );
             Vec::new()
         }
     };

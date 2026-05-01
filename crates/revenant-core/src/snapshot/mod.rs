@@ -145,13 +145,7 @@ pub fn parse_snapshot_subvol_name(name: &str) -> Option<(String, String, Snapsho
     let dash = prefix.rfind('-')?;
     let subvol = &prefix[..dash];
     let strain = &prefix[dash + 1..];
-    if subvol.is_empty() || strain.is_empty() {
-        return None;
-    }
-    if !strain
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if subvol.is_empty() || !crate::config::is_strain_token_lexical(strain) {
         return None;
     }
     Some((subvol.to_string(), strain.to_string(), id))

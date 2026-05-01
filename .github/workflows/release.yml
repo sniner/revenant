@@ -173,6 +173,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need the tagged commit's full message for release notes;
+          # default shallow clone strips the body.
+          fetch-depth: 0
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -187,7 +191,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Release notes = body of the tagged release-prep commit,
+          # minus the Co-Authored-By trailer.
+          git log -1 --pretty=%b "$GITHUB_REF_NAME" \
+            | sed '/^Co-Authored-By:/d' > release-notes.md
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file release-notes.md \
             dist/revenantctl-* dist/*.pkg.tar.zst

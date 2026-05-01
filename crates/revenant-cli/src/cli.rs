@@ -86,6 +86,11 @@ pub enum Command {
         /// by the pacman hook to feed the package list (`NeedsTargets`).
         #[arg(long, hide = true)]
         from_stdin: bool,
+        /// Mark the new snapshot as protected: it is excluded from
+        /// retention and refuses manual deletion until cleared via
+        /// `revenantctl edit <strain>@<id> --unprotect`.
+        #[arg(long)]
+        protect: bool,
     },
     /// List snapshots, optionally filtered by strain (e.g. `default@`).
     List {
@@ -149,6 +154,27 @@ pub enum Command {
         /// `--dry-run` to preview the forced purge.
         #[arg(short = 'f', long)]
         force: bool,
+    },
+    /// Edit metadata of an existing snapshot (sidecar fields only).
+    ///
+    /// Targets a single snapshot — bulk forms (`strain@`, `strain@all`)
+    /// are rejected. The snapshot must already have a sidecar; pure
+    /// subvolume snapshots without metadata cannot be edited.
+    Edit {
+        /// `strain@ID` or bare `ID` (auto-resolved across strains).
+        target: String,
+        /// Replace the message lines. Pass multiple times for multiple
+        /// lines. Omitted means "leave the existing messages alone";
+        /// passing once with an empty string clears them.
+        #[arg(short, long = "message")]
+        message: Option<Vec<String>>,
+        /// Mark the snapshot as protected: excluded from retention,
+        /// refuses manual deletion until cleared.
+        #[arg(long, conflicts_with = "unprotect")]
+        protect: bool,
+        /// Clear the protected flag.
+        #[arg(long)]
+        unprotect: bool,
     },
     /// Show configuration and filesystem status
     Status,

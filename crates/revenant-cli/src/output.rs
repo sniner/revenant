@@ -119,22 +119,24 @@ pub fn print_snapshot_list(
     }
 
     let is_live_parent = |snap: &SnapshotInfo| matches!(live_parent, Some(lp) if lp.id == snap.id && lp.strain == snap.strain);
+    let is_protected = |snap: &SnapshotInfo| snap.metadata.as_ref().is_some_and(|m| m.protected);
 
-    // Leading 2-char column ("* " or "  ") keeps the rest of the table
-    // aligned whether or not an anchor snapshot is present in the view.
-    // ID column = 19-char ID + 2 trailing pad chars, giving a 3-char
-    // gap to the strain column with the literal separator space.
-    println!("  {:<21} {:<12} Description", "ID", "Strain");
-    println!("{}", "-".repeat(66));
+    // Leading 3-char column: [live-anchor][protected-lock][space].
+    // Live = '*' or ' ', lock = 'P' or ' '. ID column = 19-char ID + 2
+    // trailing pad chars, giving a 3-char gap to the strain column with
+    // the literal separator space.
+    println!("   {:<21} {:<12} Description", "ID", "Strain");
+    println!("{}", "-".repeat(67));
 
     for snap in snapshots {
-        let marker = if is_live_parent(snap) { '*' } else { ' ' };
+        let live = if is_live_parent(snap) { '*' } else { ' ' };
+        let lock = if is_protected(snap) { 'P' } else { ' ' };
         let description = snap
             .metadata
             .as_ref()
             .map_or_else(|| "—".to_string(), metadata_summary);
         println!(
-            "{marker} {:<21} {:<12} {}",
+            "{live}{lock} {:<21} {:<12} {}",
             snap.id, snap.strain, description
         );
     }
@@ -461,6 +463,58 @@ pub fn print_delete_result(
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// edit
+// ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct EditOutput<'a> {
+    /// The snapshot record after the edit, in the same shape as a
+    /// single element from `list --json`. Consumers that already parse
+    /// `list` output can reuse the same type.
+    edited: &'a SnapshotInfo,
+    /// Wrapper-level live-parent context, kept identical to
+    /// `SnapshotListOutput` so JSON consumers do not need a new shape
+    /// to detect the live anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_parent: Option<&'a LiveParentRef>,
+}
+
+/// Render the result of a successful `edit` invocation.
+///
+/// Text mode prints a one-line summary; JSON emits the full snapshot
+/// entry plus the live-parent context, matching `print_snapshot_list`'s
+/// shape so a tool can plug the result back into the list view.
+pub fn print_edit_result(
+    mode: OutputMode,
+    snapshot: &SnapshotInfo,
+    live_parent: Option<&LiveParentRef>,
+) {
+    if mode.is_json() {
+        emit_json(&EditOutput {
+            edited: snapshot,
+            live_parent,
+        });
+        return;
+    }
+
+    let protected = snapshot.metadata.as_ref().is_some_and(|m| m.protected);
+    let message = snapshot
+        .metadata
+        .as_ref()
+        .map(|m| m.message.as_slice())
+        .unwrap_or_default();
+    let message_disp = if message.is_empty() {
+        "—".to_string()
+    } else {
+        format!("[{}]", message.join(", "))
+    };
+    println!(
+        "Edited {}@{}: protected={protected}, message={message_disp}",
+        snapshot.strain, snapshot.id
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1079,6 +1133,28 @@ mod tests {
                 "skipped_protected": ["20260411-090000"],
             })
         );
+    }
+
+    #[test]
+    fn edit_json_shape_includes_full_snapshot() {
+        // The `edit` JSON output is meant to be drop-in compatible with
+        // a single element of `list --json`, so consumers can plug it
+        // straight back into the list view.
+        let mut snap = sample_snapshot("20260411-080000", "default", false);
+        snap.metadata = Some(
+            SnapshotMetadata::new(TriggerKind::Manual, vec!["edited".into()]).with_protected(true),
+        );
+        let out = EditOutput {
+            edited: &snap,
+            live_parent: None,
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        assert_eq!(got["edited"]["id"], json!("20260411-080000"));
+        assert_eq!(got["edited"]["strain"], json!("default"));
+        assert_eq!(got["edited"]["metadata"]["protected"], json!(true));
+        assert_eq!(got["edited"]["metadata"]["message"], json!(["edited"]));
+        // No live parent ⇒ the field is omitted entirely (matches list).
+        assert!(got.get("live_parent").is_none());
     }
 
     #[test]

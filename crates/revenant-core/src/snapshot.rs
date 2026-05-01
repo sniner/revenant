@@ -659,6 +659,54 @@ pub struct BulkDeleteOutcome {
     pub skipped_protected: Vec<String>,
 }
 
+/// Field-level patch for an existing snapshot's sidecar. `None` means
+/// "leave this field alone". An empty `Some(vec![])` for `message`
+/// clears the message list.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MetadataPatch {
+    pub protected: Option<bool>,
+    pub message: Option<Vec<String>>,
+}
+
+impl MetadataPatch {
+    /// `true` when no field is set — the caller has nothing to apply.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.protected.is_none() && self.message.is_none()
+    }
+}
+
+/// Apply `patch` to a snapshot's sidecar in place and return the
+/// updated metadata. Errors if no sidecar exists for the snapshot —
+/// mutating an absent file would silently materialise metadata that
+/// the user did not previously have.
+pub fn update_snapshot_metadata(
+    config: &Config,
+    toplevel: &Path,
+    snapshot: &SnapshotInfo,
+    patch: &MetadataPatch,
+) -> Result<SnapshotMetadata> {
+    let snap_dir = snapshot_dir(config, toplevel);
+    let sidecar = sidecar_path_for_snapshot(&snap_dir, &snapshot.strain, &snapshot.id);
+
+    let mut meta = metadata::read(&sidecar)?.ok_or_else(|| {
+        RevenantError::Other(format!(
+            "snapshot {}@{} has no sidecar metadata to edit",
+            snapshot.strain, snapshot.id
+        ))
+    })?;
+
+    if let Some(p) = patch.protected {
+        meta.protected = p;
+    }
+    if let Some(msgs) = &patch.message {
+        meta.message = msgs.clone();
+    }
+
+    metadata::write(&sidecar, &meta)?;
+    Ok(meta)
+}
+
 /// Delete all snapshots belonging to a given strain. Protected snapshots
 /// are silently skipped and reported back via
 /// `BulkDeleteOutcome::skipped_protected`; the caller is expected to
@@ -1259,6 +1307,67 @@ subvolumes = [{subvol_list}]
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, protected_id);
         assert!(metadata::read(&sidecar).unwrap().is_some());
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn update_snapshot_metadata_applies_patch_in_place() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            &toplevel,
+            "default",
+            TriggerKind::Manual,
+            vec!["original".into()],
+        )
+        .unwrap();
+
+        let patch = MetadataPatch {
+            protected: Some(true),
+            message: Some(vec!["edited".into(), "second line".into()]),
+        };
+        let updated = update_snapshot_metadata(&config, &toplevel, &info, &patch).unwrap();
+        assert!(updated.protected);
+        assert_eq!(updated.message, vec!["edited", "second line"]);
+
+        // Re-read straight from disk to confirm it persisted.
+        let snap_dir = snapshot_dir(&config, &toplevel);
+        let sidecar = sidecar_path_for_snapshot(&snap_dir, "default", &info.id);
+        let on_disk = metadata::read(&sidecar).unwrap().unwrap();
+        assert!(on_disk.protected);
+        assert_eq!(on_disk.message, vec!["edited", "second line"]);
+        assert_eq!(on_disk.trigger, TriggerKind::Manual); // untouched
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn update_snapshot_metadata_errors_when_sidecar_missing() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = setup_mock(&config, &toplevel);
+        // Snapshot subvol exists, but no sidecar was ever written.
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-100000"));
+
+        let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
+        let info = snaps.into_iter().next().unwrap();
+        assert!(info.metadata.is_none());
+
+        let patch = MetadataPatch {
+            protected: Some(true),
+            message: None,
+        };
+        let err = update_snapshot_metadata(&config, &toplevel, &info, &patch).unwrap_err();
+        assert!(matches!(err, RevenantError::Other(_)));
 
         std::fs::remove_dir_all(&toplevel).ok();
     }

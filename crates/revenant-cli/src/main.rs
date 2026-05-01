@@ -152,6 +152,7 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             message,
             trigger,
             from_stdin,
+            protect,
         } => cmd_snapshot(
             mode,
             &config,
@@ -161,6 +162,22 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             message,
             trigger,
             from_stdin,
+            protect,
+        ),
+        cli::Command::Edit {
+            target,
+            message,
+            protect,
+            unprotect,
+        } => cmd_edit(
+            mode,
+            &config,
+            &backend,
+            &toplevel_path,
+            &target,
+            message,
+            protect,
+            unprotect,
         ),
         cli::Command::List { target } => {
             cmd_list(mode, &config, &backend, &toplevel_path, target.as_deref())
@@ -339,6 +356,7 @@ fn cmd_snapshot(
     message: Vec<String>,
     trigger: Option<cli::TriggerKindArg>,
     from_stdin: bool,
+    protect: bool,
 ) -> Result<()> {
     use revenant_core::metadata::TriggerKind;
     recover_pending_orphans(mode, config, backend, toplevel)?;
@@ -346,8 +364,27 @@ fn cmd_snapshot(
     let trigger: TriggerKind = trigger.map_or(TriggerKind::Manual, Into::into);
     let message = build_message(message, from_stdin);
 
-    let info = snapshot::create_snapshot(config, backend, toplevel, strain, trigger, message)
+    let mut info = snapshot::create_snapshot(config, backend, toplevel, strain, trigger, message)
         .context("failed to create snapshot")?;
+
+    // Patch the sidecar to protected before retention runs, so the
+    // newly created snapshot is shielded if the policy would otherwise
+    // sweep it (e.g. last=0). Skip silently when create_snapshot did
+    // not write a sidecar — the rest of the pipeline already tolerates
+    // that case.
+    if protect && info.metadata.is_some() {
+        let updated = snapshot::update_snapshot_metadata(
+            config,
+            toplevel,
+            &info,
+            &snapshot::MetadataPatch {
+                protected: Some(true),
+                message: None,
+            },
+        )
+        .context("failed to mark snapshot as protected")?;
+        info.metadata = Some(updated);
+    }
 
     // Auto-apply retention is opt-out via [sys] auto_apply_retention.
     // When disabled, snapshot creation never deletes anything; the
@@ -546,6 +583,55 @@ fn cmd_delete(
         }
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_edit(
+    mode: OutputMode,
+    config: &Config,
+    backend: &dyn FileSystemBackend,
+    toplevel: &Path,
+    target_str: &str,
+    message: Option<Vec<String>>,
+    protect: bool,
+    unprotect: bool,
+) -> Result<()> {
+    let target: SnapshotTarget = target_str.parse().context("invalid edit target")?;
+
+    let (scope, id) = match target {
+        SnapshotTarget::Single { strain, id } => (strain, id),
+        SnapshotTarget::AllInStrain { .. } => {
+            bail!("edit requires a single snapshot target (strain@ID or ID), not a bulk form");
+        }
+    };
+
+    let snap = snapshot::find_snapshot(config, backend, toplevel, &id, scope.as_deref())
+        .context("failed to find snapshot")?;
+
+    // clap's `conflicts_with` already rejects --protect AND --unprotect,
+    // so at most one of these is true at this point.
+    let protected = if protect {
+        Some(true)
+    } else if unprotect {
+        Some(false)
+    } else {
+        None
+    };
+
+    let patch = snapshot::MetadataPatch { protected, message };
+    if patch.is_empty() {
+        bail!("nothing to edit — pass --message, --protect, or --unprotect");
+    }
+
+    let updated = snapshot::update_snapshot_metadata(config, toplevel, &snap, &patch)
+        .context("failed to edit snapshot metadata")?;
+
+    let mut snap = snap;
+    snap.metadata = Some(updated);
+
+    let live_parent = snapshot::resolve_live_parent(config, backend, toplevel);
+    output::print_edit_result(mode, &snap, live_parent.as_ref());
     Ok(())
 }
 

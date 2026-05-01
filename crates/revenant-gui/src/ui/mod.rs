@@ -5,3 +5,4 @@
 //! plumbing (`AppState`, `Widgets`, the event loop).
 
 pub mod format;
+pub mod toast;

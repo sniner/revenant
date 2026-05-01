@@ -524,9 +524,15 @@ fn cmd_delete(
 
     match target {
         SnapshotTarget::AllInStrain { strain } => {
-            let removed = snapshot::delete_all_strain(config, backend, toplevel, &strain)
+            let outcome = snapshot::delete_all_strain(config, backend, toplevel, &strain)
                 .context("failed to delete strain snapshots")?;
-            output::print_delete_result(mode, &strain, &removed, false);
+            output::print_delete_result(
+                mode,
+                &strain,
+                &outcome.deleted,
+                &outcome.skipped_protected,
+                false,
+            );
         }
         SnapshotTarget::Single { strain: scope, id } => {
             let snap = snapshot::find_snapshot(config, backend, toplevel, &id, scope.as_deref())
@@ -536,7 +542,7 @@ fn cmd_delete(
             snapshot::delete_snapshot(config, backend, toplevel, &snap)
                 .context("failed to delete snapshot")?;
 
-            output::print_delete_result(mode, &snap_strain, &[id.to_string()], true);
+            output::print_delete_result(mode, &snap_strain, &[id.to_string()], &[], true);
         }
     }
 

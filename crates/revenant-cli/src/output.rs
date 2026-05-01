@@ -403,14 +403,30 @@ pub fn print_snapshot_created(mode: OutputMode, info: &SnapshotInfo, retention_r
 struct DeleteOutput<'a> {
     strain: &'a str,
     deleted: &'a [String],
+    /// Snapshot ids that were left untouched because the sidecar carries
+    /// `protected = true`. Always present in the JSON output (possibly
+    /// empty) so consumers do not need to special-case absence.
+    skipped_protected: &'a [String],
 }
 
 /// Render the result of a `delete` invocation.  `deleted` is always a
 /// list even for a single snapshot delete, so consumers have one shape
-/// to handle.
-pub fn print_delete_result(mode: OutputMode, strain: &str, deleted: &[String], single: bool) {
+/// to handle. `skipped_protected` only applies to the bulk path
+/// (`strain@`) — for single deletes it is expected to be empty (the
+/// core layer surfaces a `ProtectedSnapshot` error instead).
+pub fn print_delete_result(
+    mode: OutputMode,
+    strain: &str,
+    deleted: &[String],
+    skipped_protected: &[String],
+    single: bool,
+) {
     if mode.is_json() {
-        emit_json(&DeleteOutput { strain, deleted });
+        emit_json(&DeleteOutput {
+            strain,
+            deleted,
+            skipped_protected,
+        });
         return;
     }
 
@@ -423,16 +439,27 @@ pub fn print_delete_result(mode: OutputMode, strain: &str, deleted: &[String], s
     }
 
     // Bulk path (`strain@` / `strain@all`).
-    if deleted.is_empty() {
+    if deleted.is_empty() && skipped_protected.is_empty() {
         println!("No snapshots found for strain '{strain}'.");
     } else {
         for id in deleted {
             println!("Deleted: {strain}@{id}");
         }
-        println!(
-            "Deleted {} snapshot(s) from strain '{strain}'.",
-            deleted.len()
-        );
+        if !deleted.is_empty() {
+            println!(
+                "Deleted {} snapshot(s) from strain '{strain}'.",
+                deleted.len()
+            );
+        }
+        if !skipped_protected.is_empty() {
+            for id in skipped_protected {
+                println!("Skipped (protected): {strain}@{id}");
+            }
+            println!(
+                "Skipped {} protected snapshot(s) — run `revenantctl edit {strain}@<id> --unprotect` to allow deletion.",
+                skipped_protected.len()
+            );
+        }
     }
 }
 
@@ -1017,9 +1044,11 @@ mod tests {
     #[test]
     fn delete_json_shape() {
         let deleted = vec!["20260411-080000".to_string()];
+        let skipped: Vec<String> = vec![];
         let out = DeleteOutput {
             strain: "default",
             deleted: &deleted,
+            skipped_protected: &skipped,
         };
         let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
         assert_eq!(
@@ -1027,6 +1056,27 @@ mod tests {
             json!({
                 "strain": "default",
                 "deleted": ["20260411-080000"],
+                "skipped_protected": [],
+            })
+        );
+    }
+
+    #[test]
+    fn delete_json_shape_with_skipped_protected() {
+        let deleted = vec!["20260411-080000".to_string()];
+        let skipped = vec!["20260411-090000".to_string()];
+        let out = DeleteOutput {
+            strain: "default",
+            deleted: &deleted,
+            skipped_protected: &skipped,
+        };
+        let got: serde_json::Value = serde_json::from_str(&to_json_string(&out)).unwrap();
+        assert_eq!(
+            got,
+            json!({
+                "strain": "default",
+                "deleted": ["20260411-080000"],
+                "skipped_protected": ["20260411-090000"],
             })
         );
     }

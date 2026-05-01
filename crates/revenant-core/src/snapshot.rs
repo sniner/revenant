@@ -605,12 +605,25 @@ pub fn create_snapshot(
 }
 
 /// Delete a snapshot and all its associated subvolumes.
+///
+/// Refuses to touch snapshots whose sidecar carries `protected = true`;
+/// in that case nothing is removed and a `ProtectedSnapshot` error is
+/// returned so the caller can surface the blocking message verbatim.
+/// Retention also pre-filters protected snapshots; this check is
+/// defence-in-depth for direct callers (CLI `delete`, GUI delete button).
 pub fn delete_snapshot(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     snapshot: &SnapshotInfo,
 ) -> Result<()> {
+    if snapshot.metadata.as_ref().is_some_and(|m| m.protected) {
+        return Err(RevenantError::ProtectedSnapshot {
+            strain: snapshot.strain.clone(),
+            id: snapshot.id.to_string(),
+        });
+    }
+
     tracing::info!(
         "deleting snapshot {} (strain: {})",
         snapshot.id,
@@ -635,27 +648,52 @@ pub fn delete_snapshot(
     Ok(())
 }
 
-/// Delete all snapshots belonging to a given strain.
+/// Outcome of `delete_all_strain`: ids that were removed and ids that
+/// were skipped because the snapshot is protected. Both are returned
+/// (rather than letting the protected case error out) so a bulk delete
+/// over a mixed strain still cleans up everything it can without
+/// surprising the user with a half-finished operation.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BulkDeleteOutcome {
+    pub deleted: Vec<String>,
+    pub skipped_protected: Vec<String>,
+}
+
+/// Delete all snapshots belonging to a given strain. Protected snapshots
+/// are silently skipped and reported back via
+/// `BulkDeleteOutcome::skipped_protected`; the caller is expected to
+/// surface a warning.
 pub fn delete_all_strain(
     config: &Config,
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
     strain_name: &str,
-) -> Result<Vec<String>> {
+) -> Result<BulkDeleteOutcome> {
     let all = discover_snapshots(config, backend, toplevel)?;
-    let strain_snapshots: Vec<_> = all
+    let (deletable, skipped): (Vec<_>, Vec<_>) = all
         .into_iter()
         .filter(|s| s.strain == strain_name)
-        .collect();
+        .partition(|s| !s.metadata.as_ref().is_some_and(|m| m.protected));
 
-    let mut removed = Vec::new();
-    for snap in &strain_snapshots {
+    let mut outcome = BulkDeleteOutcome {
+        deleted: Vec::with_capacity(deletable.len()),
+        skipped_protected: skipped.iter().map(|s| s.id.to_string()).collect(),
+    };
+
+    for snap in &deletable {
         tracing::info!("deleting snapshot {} (strain: {strain_name})", snap.id);
         delete_snapshot(config, backend, toplevel, snap)?;
-        removed.push(snap.id.to_string());
+        outcome.deleted.push(snap.id.to_string());
     }
 
-    Ok(removed)
+    if !outcome.skipped_protected.is_empty() {
+        tracing::info!(
+            "skipped {} protected snapshot(s) in strain {strain_name}",
+            outcome.skipped_protected.len()
+        );
+    }
+
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -1029,7 +1067,8 @@ subvolumes = [{subvol_list}]
         mock.seed_subvolume(toplevel.join("@snapshots/@-periodic-20260316-120000"));
 
         let removed = delete_all_strain(&config, &mock, toplevel, "default").unwrap();
-        assert_eq!(removed.len(), 2);
+        assert_eq!(removed.deleted.len(), 2);
+        assert!(removed.skipped_protected.is_empty());
 
         // periodic snapshot survived
         let snaps = discover_snapshots(&config, &mock, toplevel).unwrap();
@@ -1045,8 +1084,13 @@ subvolumes = [{subvol_list}]
         let mock = setup_mock(&config, toplevel);
 
         let removed = delete_all_strain(&config, &mock, toplevel, "default").unwrap();
-        assert!(removed.is_empty());
+        assert!(removed.deleted.is_empty());
+        assert!(removed.skipped_protected.is_empty());
     }
+
+    // Protected-snapshot tests live in the sidecar-using block below
+    // (after `temp_toplevel`), since they need real filesystem I/O for
+    // the sidecar.
 
     // ----- metadata sidecar integration -----
     //
@@ -1131,6 +1175,90 @@ subvolumes = [{subvol_list}]
         let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
         assert_eq!(snaps.len(), 1);
         assert!(snaps[0].metadata.is_none());
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn delete_snapshot_refuses_protected() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            &toplevel,
+            "default",
+            TriggerKind::Manual,
+            vec![],
+        )
+        .unwrap();
+
+        // Flip the sidecar to protected.
+        let snap_dir = snapshot_dir(&config, &toplevel);
+        let sidecar = sidecar_path_for_snapshot(&snap_dir, "default", &info.id);
+        let protected_meta =
+            SnapshotMetadata::new(TriggerKind::Manual, vec![]).with_protected(true);
+        metadata::write(&sidecar, &protected_meta).unwrap();
+
+        // Re-discover so the in-memory snapshot carries the flag.
+        let snaps = discover_snapshots(&config, &mock, &toplevel).unwrap();
+        let protected = snaps.iter().find(|s| s.id == info.id).unwrap();
+
+        let err = delete_snapshot(&config, &mock, &toplevel, protected).unwrap_err();
+        match err {
+            RevenantError::ProtectedSnapshot { strain, id } => {
+                assert_eq!(strain, "default");
+                assert_eq!(id, info.id.to_string());
+            }
+            other => panic!("expected ProtectedSnapshot, got {other:?}"),
+        }
+
+        // Subvolumes and sidecar must still be there.
+        let snap_path = snap_dir.join(info.id.snapshot_name("@", "default"));
+        assert!(mock.contains(&snap_path));
+        assert!(metadata::read(&sidecar).unwrap().is_some());
+
+        std::fs::remove_dir_all(&toplevel).ok();
+    }
+
+    #[test]
+    fn delete_all_strain_skips_protected_and_keeps_going() {
+        let config = config_no_efi(&["@"]);
+        let toplevel = temp_toplevel();
+        std::fs::create_dir_all(toplevel.join("@snapshots")).unwrap();
+        let mock = setup_mock(&config, &toplevel);
+
+        // Three default-strain snapshots; middle one protected.
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-100000"));
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-110000"));
+        mock.seed_subvolume(toplevel.join("@snapshots/@-default-20260316-120000"));
+
+        let snap_dir = snapshot_dir(&config, &toplevel);
+        let protected_id = SnapshotId::from_string("20260316-110000").unwrap();
+        let sidecar = sidecar_path_for_snapshot(&snap_dir, "default", &protected_id);
+        metadata::write(
+            &sidecar,
+            &SnapshotMetadata::new(TriggerKind::Manual, vec![]).with_protected(true),
+        )
+        .unwrap();
+
+        let outcome = delete_all_strain(&config, &mock, &toplevel, "default").unwrap();
+        assert_eq!(outcome.deleted.len(), 2);
+        assert_eq!(
+            outcome.skipped_protected,
+            vec!["20260316-110000".to_string()]
+        );
+
+        // Protected one is the only survivor; sidecar still present.
+        let remaining = discover_snapshots(&config, &mock, &toplevel).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, protected_id);
+        assert!(metadata::read(&sidecar).unwrap().is_some());
 
         std::fs::remove_dir_all(&toplevel).ok();
     }

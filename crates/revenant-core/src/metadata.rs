@@ -64,6 +64,12 @@ pub struct SnapshotMetadata {
     pub trigger: TriggerKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub message: Vec<String>,
+    /// User-set flag that excludes this snapshot from retention and
+    /// blocks manual deletion until cleared via `revenantctl edit
+    /// --unprotect`. Default `false`; serialised only when `true` so
+    /// older sidecars stay one-line shorter.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub protected: bool,
 }
 
 fn default_schema_version() -> u32 {
@@ -79,7 +85,15 @@ impl SnapshotMetadata {
             created_at: Local::now().fixed_offset(),
             trigger,
             message,
+            protected: false,
         }
+    }
+
+    /// Builder-style setter for the `protected` flag.
+    #[must_use]
+    pub fn with_protected(mut self, protected: bool) -> Self {
+        self.protected = protected;
+        self
     }
 }
 
@@ -361,6 +375,59 @@ mod tests {
         let loaded = read(&path).unwrap().unwrap();
         assert_eq!(loaded.trigger, TriggerKind::SystemdBoot);
         assert_eq!(loaded.message, vec!["revenant-boot.service".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn round_trip_protected_true_persists_field() {
+        let dir = tmpdir();
+        let path = dir.join("prot.meta.toml");
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec!["baseline".into()])
+            .with_protected(true);
+        write(&path, &meta).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serialized.contains("protected = true"),
+            "protected=true must appear in the TOML, got:\n{serialized}"
+        );
+        let loaded = read(&path).unwrap().unwrap();
+        assert!(loaded.protected);
+        assert_eq!(loaded.message, vec!["baseline".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn round_trip_protected_false_omits_field() {
+        let dir = tmpdir();
+        let path = dir.join("unp.meta.toml");
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec!["note".into()]);
+        write(&path, &meta).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !serialized.contains("protected"),
+            "default-false protected must be skipped on serialize, got:\n{serialized}"
+        );
+        let loaded = read(&path).unwrap().unwrap();
+        assert!(!loaded.protected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_old_sidecar_without_protected_defaults_to_false() {
+        // Backwards-compat: a sidecar written before the protected field
+        // existed must load cleanly with protected = false.
+        let dir = tmpdir();
+        let path = dir.join("legacy.meta.toml");
+        let text = r#"
+schema_version = 1
+created_at = "2026-04-14T14:05:01+02:00"
+trigger = "manual"
+message = ["legacy"]
+"#;
+        std::fs::write(&path, text).unwrap();
+        let loaded = read(&path).unwrap().unwrap();
+        assert!(!loaded.protected);
+        assert_eq!(loaded.message, vec!["legacy".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

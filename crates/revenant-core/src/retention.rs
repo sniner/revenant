@@ -8,9 +8,14 @@ use crate::snapshot::SnapshotInfo;
 
 /// Reason a snapshot is selected for retention.  A snapshot may satisfy
 /// several rules at once; `select_to_keep_explained` returns all of them.
+///
+/// `Protected` is the user-set sidecar flag and ranks above the
+/// time-bucket rules: it always appears first in the per-snapshot reasons
+/// list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeepReason {
+    Protected,
     Last,
     Hourly,
     Daily,
@@ -23,6 +28,7 @@ impl KeepReason {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Protected => "protected",
             Self::Last => "last",
             Self::Hourly => "hourly",
             Self::Daily => "daily",
@@ -49,6 +55,17 @@ pub fn select_to_keep_explained(
     sorted.sort_by(|a, b| b.id.cmp(&a.id));
 
     let mut keep: HashMap<String, Vec<KeepReason>> = HashMap::new();
+
+    // Protected ranks above the time-bucket rules so it lands first in
+    // each snapshot's reason list. Iterating the original (unsorted) list
+    // is fine — we are inserting into a map, not building an order.
+    for snap in snapshots {
+        if snap.metadata.as_ref().is_some_and(|m| m.protected) {
+            keep.entry(snap.id.to_string())
+                .or_default()
+                .push(KeepReason::Protected);
+        }
+    }
 
     if retain.last > 0 {
         for snap in sorted.iter().take(retain.last) {
@@ -154,6 +171,7 @@ fn mark_bucket<F>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::{SnapshotMetadata, TriggerKind};
     use crate::snapshot::SnapshotId;
 
     fn make_snap(ts: &str) -> SnapshotInfo {
@@ -164,6 +182,12 @@ mod tests {
             efi_synced: false,
             metadata: None,
         }
+    }
+
+    fn make_protected(ts: &str) -> SnapshotInfo {
+        let mut s = make_snap(ts);
+        s.metadata = Some(SnapshotMetadata::new(TriggerKind::Manual, vec![]).with_protected(true));
+        s
     }
 
     #[test]
@@ -303,6 +327,51 @@ mod tests {
         let explained = select_to_keep_explained(&refs, &retain);
         let explained_keys: HashSet<String> = explained.into_keys().collect();
         assert_eq!(keep, explained_keys);
+    }
+
+    #[test]
+    fn protected_snapshot_is_kept_under_zero_retention() {
+        // Even with all retention rules disabled, a protected snapshot
+        // must end up in `keep` — only its companions get culled.
+        let snaps = [
+            make_snap("20260101-000000"),
+            make_protected("20260102-000000"),
+            make_snap("20260103-000000"),
+        ];
+        let refs: Vec<&SnapshotInfo> = snaps.iter().collect();
+        let retain_zero = RetainConfig {
+            last: 0,
+            hourly: 0,
+            daily: 0,
+            weekly: 0,
+            monthly: 0,
+            yearly: 0,
+        };
+        let keep = select_to_keep(&refs, &retain_zero);
+        assert_eq!(keep.len(), 1);
+        assert!(keep.contains("20260102-000000"));
+    }
+
+    #[test]
+    fn protected_reason_appears_first() {
+        // A snapshot that is both protected and last-bucket-eligible
+        // must list `Protected` ahead of `Last` so callers see the
+        // strongest reason first.
+        let snaps = [
+            make_protected("20260103-000000"),
+            make_snap("20260102-000000"),
+            make_snap("20260101-000000"),
+        ];
+        let refs: Vec<&SnapshotInfo> = snaps.iter().collect();
+        let retain = RetainConfig {
+            last: 1,
+            ..Default::default()
+        };
+        let keep = select_to_keep_explained(&refs, &retain);
+        assert_eq!(
+            keep.get("20260103-000000"),
+            Some(&vec![KeepReason::Protected, KeepReason::Last])
+        );
     }
 
     #[test]

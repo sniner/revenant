@@ -43,6 +43,11 @@ pub enum RevenantError {
     #[error("operation requires root privileges")]
     NotRoot,
 
+    #[error(
+        "snapshot {strain}@{id} is protected; run `revenantctl edit {strain}@{id} --unprotect` first"
+    )]
+    ProtectedSnapshot { strain: String, id: String },
+
     #[error("{0}")]
     Other(String),
 }

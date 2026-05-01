@@ -89,6 +89,10 @@ pub struct Snapshot {
     /// snapshots without a sidecar.
     pub message: Vec<String>,
     pub is_live_anchor: bool,
+    /// Mirrors the sidecar `protected` flag. Protected snapshots are
+    /// excluded from retention and refuse `DeleteSnapshot` until cleared
+    /// via `SetSnapshotProtected(_, _, false)`.
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +163,7 @@ impl Snapshot {
             trigger: read_str(d, "trigger").unwrap_or("unknown").to_string(),
             message: read_string_array(d, "message"),
             is_live_anchor: read_bool(d, "is_live_anchor").unwrap_or(false),
+            protected: read_bool(d, "protected").unwrap_or(false),
         })
     }
 }

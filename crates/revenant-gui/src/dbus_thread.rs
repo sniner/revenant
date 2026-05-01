@@ -109,6 +109,18 @@ pub enum Event {
         id: String,
         result: Result<(), String>,
     },
+    /// Result of a `SetSnapshotProtected` call. Carries the strain/id
+    /// pair plus the *requested* protected value, so the GUI can roll
+    /// back the optimistic icon flip on failure without re-deriving the
+    /// previous state. On success the daemon's inotify-driven
+    /// `SnapshotsChanged` reloads the list and reconciles the
+    /// optimistic state with the on-disk truth.
+    SetSnapshotProtectedResult {
+        strain: String,
+        id: String,
+        requested: bool,
+        result: Result<Snapshot, String>,
+    },
     /// Result of `ListDeleteMarkers` — the current set of pre-restore
     /// states (tombstones). Sent on initial fetch and after every
     /// `DeleteMarkersChanged` signal. The header-button visibility and
@@ -166,6 +178,15 @@ pub enum Command {
     /// Issue a privileged `DeleteSnapshot` call. Worker replies with
     /// `Event::DeleteSnapshotResult`.
     DeleteSnapshot { strain: String, id: String },
+    /// Issue a privileged `SetSnapshotProtected` call. Worker replies
+    /// with `Event::SetSnapshotProtectedResult` carrying the requested
+    /// value back so the GUI can roll back the optimistic icon flip on
+    /// failure.
+    SetSnapshotProtected {
+        strain: String,
+        id: String,
+        protected: bool,
+    },
     /// Purge the named tombstones. Worker replies with
     /// `Event::PurgeTombstonesResult`. Polkit prompt happens inside
     /// the daemon.
@@ -467,6 +488,30 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
                 .map_err(|e| format!("{e}"));
             let _ = evt_tx
                 .send(Event::DeleteSnapshotResult { strain, id, result })
+                .await;
+        }
+        Command::SetSnapshotProtected {
+            strain,
+            id,
+            protected,
+        } => {
+            let result = match client
+                .proxy()
+                .set_snapshot_protected(&strain, &id, protected)
+                .await
+            {
+                Ok(raw) => Snapshot::from_dict(&raw).ok_or_else(|| {
+                    "daemon returned malformed SetSnapshotProtected result dict".to_string()
+                }),
+                Err(e) => Err(format!("{e}")),
+            };
+            let _ = evt_tx
+                .send(Event::SetSnapshotProtectedResult {
+                    strain,
+                    id,
+                    requested: protected,
+                    result,
+                })
                 .await;
         }
         Command::PurgeTombstones(names) => {

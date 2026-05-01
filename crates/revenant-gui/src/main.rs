@@ -593,6 +593,16 @@ fn apply_event(
         Event::DeleteSnapshotResult { strain, id, result } => {
             apply_delete_snapshot_result(widgets, state, &strain, &id, result);
         }
+        Event::SetSnapshotProtectedResult {
+            strain,
+            id,
+            requested,
+            result,
+        } => {
+            apply_set_snapshot_protected_result(
+                widgets, state, cmd_tx, &strain, &id, requested, result,
+            );
+        }
         Event::Tombstones(result) => {
             apply_tombstones(widgets, state, result);
         }
@@ -957,6 +967,23 @@ fn snapshot_row(
         .css_classes(["heading"])
         .build();
 
+    // Lock toggle: closed = protected, open = unprotected. The icon
+    // flips optimistically on click (snappy feel under polkit latency);
+    // the daemon-side `SnapshotsChanged` reload reconciles or the
+    // failure handler reverts.
+    let lock_btn = gtk::Button::builder()
+        .icon_name(if snap.protected {
+            "changes-prevent-symbolic"
+        } else {
+            "changes-allow-symbolic"
+        })
+        .tooltip_text(if snap.protected {
+            "Protected — click to allow retention and deletion"
+        } else {
+            "Unprotected — click to protect from retention and deletion"
+        })
+        .css_classes(["flat", "circular"])
+        .build();
     let restore_btn = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Restore snapshot")
@@ -967,7 +994,12 @@ fn snapshot_row(
         .tooltip_text("Delete snapshot")
         .css_classes(["flat", "circular", "destructive-action"])
         .build();
-    if snap.is_live_anchor {
+    if snap.protected {
+        delete_btn.set_sensitive(false);
+        delete_btn.set_tooltip_text(Some(
+            "Snapshot is protected — click the lock first to allow deletion.",
+        ));
+    } else if snap.is_live_anchor {
         delete_btn.set_tooltip_text(Some(
             "Delete snapshot. This snapshot is the parent of the running \
              system; deleting it removes the ★ live-anchor reference, the \
@@ -986,6 +1018,7 @@ fn snapshot_row(
         .hexpand(true)
         .build();
     headline.append(&spacer);
+    headline.append(&lock_btn);
     headline.append(&restore_btn);
     headline.append(&delete_btn);
 
@@ -1020,6 +1053,37 @@ fn snapshot_row(
     }
 
     let row = gtk::ListBoxRow::builder().child(&body).build();
+
+    {
+        let snap = snap.clone();
+        let cmd_tx = cmd_tx.clone();
+        let lock_btn = lock_btn.clone();
+        lock_btn.connect_clicked(move |btn| {
+            // Flip the icon and tooltip immediately for a snappy feel
+            // under polkit latency. The daemon's `SnapshotsChanged`
+            // reload (success path) replaces this row anyway; on
+            // failure the result handler kicks a list reload that
+            // reverts.
+            let new_protected = !snap.protected;
+            btn.set_icon_name(if new_protected {
+                "changes-prevent-symbolic"
+            } else {
+                "changes-allow-symbolic"
+            });
+            btn.set_tooltip_text(Some(if new_protected {
+                "Protected — click to allow retention and deletion"
+            } else {
+                "Unprotected — click to protect from retention and deletion"
+            }));
+            // Avoid double-fires while the round-trip is in flight.
+            btn.set_sensitive(false);
+            let _ = cmd_tx.send_blocking(Command::SetSnapshotProtected {
+                strain: snap.strain.clone(),
+                id: snap.id.clone(),
+                protected: new_protected,
+            });
+        });
+    }
 
     {
         let snap = snap.clone();
@@ -1746,6 +1810,51 @@ fn apply_purge_tombstones_result(
             widgets
                 .toast_overlay
                 .add_toast(adw::Toast::new(&format!("Cleanup failed: {reason}")));
+        }
+    }
+}
+
+/// Reconcile a `SetSnapshotProtected` round-trip with the optimistic
+/// icon flip in `snapshot_row`.
+///
+/// On success the daemon's inotify watcher fires `SnapshotsChanged`,
+/// which already triggers a list reload — nothing further is needed
+/// here. On failure we surface the daemon's reason as a toast and
+/// kick a manual reload of the current strain so the row rebuilds
+/// with the (unchanged) on-disk state, undoing the optimistic flip.
+fn apply_set_snapshot_protected_result(
+    widgets: &Widgets,
+    state: &Rc<RefCell<AppState>>,
+    cmd_tx: &async_channel::Sender<Command>,
+    strain: &str,
+    id: &str,
+    requested: bool,
+    result: Result<Snapshot, String>,
+) {
+    match result {
+        Ok(_snap) => {
+            let action = if requested {
+                "Protected"
+            } else {
+                "Unprotected"
+            };
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("{action} {strain}@{id}")));
+        }
+        Err(reason) => {
+            tracing::warn!("SetSnapshotProtected({strain}@{id}={requested}) failed: {reason}");
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&format!("Protect change failed: {reason}")));
+            // Reload the visible strain so the row rebuilds from the
+            // on-disk truth, reverting the optimistic icon flip.
+            let selected = state.borrow().selected_strain.clone();
+            if let Some(sel) = selected {
+                if sel == strain {
+                    let _ = cmd_tx.send_blocking(Command::LoadSnapshots(sel));
+                }
+            }
         }
     }
 }

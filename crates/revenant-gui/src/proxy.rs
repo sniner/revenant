@@ -61,6 +61,9 @@ pub trait Daemon {
 
     fn delete_snapshot(&self, strain: &str, id: &str) -> zbus::Result<()>;
 
+    fn set_snapshot_protected(&self, strain: &str, id: &str, protected: bool)
+    -> zbus::Result<Dict>;
+
     fn restore(&self, strain: &str, id: &str, options: Dict) -> zbus::Result<Dict>;
 
     // -- DELETE markers -----------------------------------------------

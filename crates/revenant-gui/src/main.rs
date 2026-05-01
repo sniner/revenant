@@ -569,6 +569,11 @@ fn apply_event(
         }
         Event::LiveParent(Err(reason)) => {
             tracing::warn!("GetLiveParent failed: {reason}");
+            show_error_toast(
+                &widgets.toast_overlay,
+                "Could not resolve live parent",
+                &reason,
+            );
         }
         Event::Snapshots { strain, result } => {
             apply_snapshots(parent, widgets, state, cmd_tx, &strain, result);

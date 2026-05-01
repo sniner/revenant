@@ -31,100 +31,100 @@ const APP_ID: &str = "dev.sniner.RevenantGui";
 /// `Rc<RefCell<...>>` is the standard gtk-rs idiom because GTK is
 /// single-threaded — every callback runs on the main loop.
 #[derive(Default)]
-struct AppState {
-    strains: Vec<Strain>,
-    live_parent: Option<LiveParent>,
+pub(crate) struct AppState {
+    pub(crate) strains: Vec<Strain>,
+    pub(crate) live_parent: Option<LiveParent>,
     /// Per-strain rollup ({count, latest_iso}) populated by
     /// `Event::AllSnapshots`. Drives the sidebar subtitle. Read-only
     /// for `apply_strains`; written when the cross-strain snapshot
     /// fetch returns.
-    strain_stats: HashMap<String, StrainStats>,
-    selected_strain: Option<String>,
+    pub(crate) strain_stats: HashMap<String, StrainStats>,
+    pub(crate) selected_strain: Option<String>,
     /// Snapshots shown in the centre pane for `selected_strain`.
     /// Indexed by `GtkListBoxRow::index()`.
-    snapshots: Vec<Snapshot>,
+    pub(crate) snapshots: Vec<Snapshot>,
     /// True between sending `Command::Restore` and receiving
     /// `Event::RestoreResult`. Per-row Restore buttons no-op while
     /// this is set so a second prompt can't queue behind the first.
-    restore_in_flight: bool,
+    pub(crate) restore_in_flight: bool,
     /// Toast displayed while a restore is being processed (polkit
     /// auth + actual subvol work). Held so we can dismiss it the
     /// moment the result arrives, before showing the success toast
     /// or the error toast.
-    restore_progress_toast: Option<ProgressToast>,
+    pub(crate) restore_progress_toast: Option<ProgressToast>,
     /// True between sending `Command::CreateSnapshot` and receiving
     /// `Event::CreateSnapshotResult`. Same purpose as
     /// `restore_in_flight` — gates the strain-header `+` button so a
     /// second click during the polkit prompt doesn't queue a second
     /// snapshot request.
-    create_in_flight: bool,
+    pub(crate) create_in_flight: bool,
     /// Toast displayed while a CreateSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
-    create_progress_toast: Option<ProgressToast>,
+    pub(crate) create_progress_toast: Option<ProgressToast>,
     /// True between sending `Command::DeleteSnapshot` and receiving
     /// `Event::DeleteSnapshotResult`. Per-row Delete buttons read
     /// this and no-op while it's set so a second polkit prompt can't
     /// queue behind the first.
-    delete_in_flight: bool,
+    pub(crate) delete_in_flight: bool,
     /// Toast displayed while a DeleteSnapshot is being processed.
     /// Same dismissal pattern as `restore_progress_toast`.
-    delete_progress_toast: Option<ProgressToast>,
+    pub(crate) delete_progress_toast: Option<ProgressToast>,
     /// Strain to pre-select on the very first `Strains` event, sourced
     /// from the daemon's `GetLatestStrain` reply. Consumed (taken) the
     /// first time `apply_strains` runs without an existing user
     /// selection; subsequent refreshes fall back to whatever the user
     /// is currently looking at.
-    initial_pref_strain: Option<String>,
+    pub(crate) initial_pref_strain: Option<String>,
     /// Pre-restore states (tombstones) currently on disk. Drives the
     /// header-bar cleanup button's visibility and the contents of the
     /// review dialog.
-    tombstones: Vec<Tombstone>,
+    pub(crate) tombstones: Vec<Tombstone>,
     /// True between sending `Command::PurgeTombstones` and receiving
     /// `Event::PurgeTombstonesResult`. Gates the cleanup button so a
     /// second polkit prompt can't queue.
-    purge_in_flight: bool,
+    pub(crate) purge_in_flight: bool,
     /// Toast displayed while a purge is being processed.
-    purge_progress_toast: Option<ProgressToast>,
+    pub(crate) purge_progress_toast: Option<ProgressToast>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
 /// widget just bumps a refcount, so this struct can be cloned cheaply
 /// into closures.
 #[derive(Clone)]
-struct Widgets {
-    root_stack: gtk::Stack,
-    status_page: adw::StatusPage,
-    strain_list: gtk::ListBox,
-    snapshot_stack: gtk::Stack,
-    snapshot_list: gtk::ListBox,
-    snapshot_scroll: gtk::ScrolledWindow,
-    snapshot_empty: adw::StatusPage,
-    snapshot_error: adw::StatusPage,
+pub(crate) struct Widgets {
+    pub(crate) root_stack: gtk::Stack,
+    pub(crate) status_page: adw::StatusPage,
+    pub(crate) strain_list: gtk::ListBox,
+    pub(crate) snapshot_stack: gtk::Stack,
+    pub(crate) snapshot_list: gtk::ListBox,
+    pub(crate) snapshot_scroll: gtk::ScrolledWindow,
+    pub(crate) snapshot_empty: adw::StatusPage,
+    pub(crate) snapshot_error: adw::StatusPage,
     /// Title label on the right pane — shows the currently-selected
     /// strain name (display_name preferred, identifier as fallback).
     /// Empty string before the first selection lands.
-    content_title: gtk::Label,
+    pub(crate) content_title: gtk::Label,
     /// Calendar button on the content toolbar — opens the retention
     /// editor for the currently-selected strain.
-    strain_btn_retention: gtk::Button,
+    pub(crate) strain_btn_retention: gtk::Button,
     /// `+` button on the content toolbar — opens the create-snapshot
     /// dialog. The new snapshot lands in the currently-selected
     /// strain.
-    strain_btn_create: gtk::Button,
+    pub(crate) strain_btn_create: gtk::Button,
     /// Tiny icon in the window header showing daemon connection
     /// state. Replaces the old "Live state" footer.
-    header_status_icon: gtk::Image,
+    pub(crate) header_status_icon: gtk::Image,
     /// Header-bar button that surfaces leftover pre-restore states
     /// (DELETE markers). Hidden when there are none. Click opens the
     /// review dialog. The label is the count, so the user sees at a
     /// glance how many entries are waiting.
-    header_btn_cleanup: gtk::Button,
+    pub(crate) header_btn_cleanup: gtk::Button,
     /// Toast overlay wrapping the whole main content. Restore-flow
     /// progress / success / failure messages are surfaced through it.
-    toast_overlay: adw::ToastOverlay,
+    pub(crate) toast_overlay: adw::ToastOverlay,
     /// Banner shown after a successful restore with a "Reboot now"
     /// action. Hidden until a real (non-dry-run) restore returns.
-    reboot_banner: adw::Banner,
+    pub(crate) reboot_banner: adw::Banner,
 }
 
 fn main() -> glib::ExitCode {

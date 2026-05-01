@@ -9,8 +9,9 @@
 
 # revenant
 
-A system snapshot tool for Linux, written in Rust. Think of it as a spiritually correct
-alternative to [Timeshift](https://github.com/linuxmint/timeshift) — without the baggage.
+A system snapshot tool for Linux, written in Rust. Inspired by
+[Timeshift](https://github.com/linuxmint/timeshift), but focused on CoW filesystems with
+systemd-boot integration and the EFI partition snapshotted alongside the rootfs.
 
 ## Motivation
 

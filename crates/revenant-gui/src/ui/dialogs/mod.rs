@@ -4,4 +4,5 @@
 pub mod cleanup;
 pub mod create;
 pub mod delete;
+pub mod restore;
 pub mod retention;

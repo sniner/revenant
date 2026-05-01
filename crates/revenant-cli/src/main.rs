@@ -137,8 +137,14 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
 
     let backend = BtrfsBackend::new();
 
-    // Mount the btrfs top-level subvolume (subvolid=5) to a temporary location
-    let toplevel = mount_toplevel(&config)?;
+    // Mount the btrfs top-level subvolume (subvolid=5) on a fresh
+    // per-invocation directory. The RAII guard unmounts on drop —
+    // including on panic — so we never leak a mount the next run
+    // would collide with (the previous fixed-path `/tmp/revenant-
+    // toplevel` could survive a crashed run and trip EBUSY on the
+    // next mount).
+    let toplevel = ToplevelMount::mount(&config)?;
+    let toplevel_path = toplevel.path().to_path_buf();
 
     let result = match cli.command {
         cli::Command::Snapshot {
@@ -147,10 +153,17 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             trigger,
             from_stdin,
         } => cmd_snapshot(
-            mode, &config, &backend, &toplevel, &strain, message, trigger, from_stdin,
+            mode,
+            &config,
+            &backend,
+            &toplevel_path,
+            &strain,
+            message,
+            trigger,
+            from_stdin,
         ),
         cli::Command::List { target } => {
-            cmd_list(mode, &config, &backend, &toplevel, target.as_deref())
+            cmd_list(mode, &config, &backend, &toplevel_path, target.as_deref())
         }
         cli::Command::Restore {
             snapshot,
@@ -161,84 +174,89 @@ fn run(cli: cli::Cli, mode: OutputMode) -> Result<()> {
             mode,
             &config,
             &backend,
-            &toplevel,
+            &toplevel_path,
             &snapshot,
             yes,
             force,
             save_current,
         ),
-        cli::Command::Delete { target } => cmd_delete(mode, &config, &backend, &toplevel, &target),
-        cli::Command::Cleanup { dry_run, force } => {
-            cmd_cleanup(mode, &config, &backend, &toplevel, dry_run, force)
+        cli::Command::Delete { target } => {
+            cmd_delete(mode, &config, &backend, &toplevel_path, &target)
         }
-        cli::Command::Status => cmd_status(mode, &config, &backend, &toplevel),
+        cli::Command::Cleanup { dry_run, force } => {
+            cmd_cleanup(mode, &config, &backend, &toplevel_path, dry_run, force)
+        }
+        cli::Command::Status => cmd_status(mode, &config, &backend, &toplevel_path),
         cli::Command::Init { .. } | cli::Command::Check => unreachable!(),
     };
 
-    // Unmount toplevel
-    unmount_toplevel(&toplevel);
+    // toplevel drops here, unmounting and removing the temp dir
+    // even if the command above returned an error.
+    drop(toplevel);
 
     result
 }
 
-fn mount_toplevel(config: &Config) -> Result<std::path::PathBuf> {
-    let mount_point = std::env::temp_dir().join("revenant-toplevel");
-    std::fs::create_dir_all(&mount_point).context("failed to create temporary mount point")?;
+/// RAII guard around the per-invocation btrfs toplevel mount.
+///
+/// The CLI used to mount the toplevel on a fixed path
+/// (`/tmp/revenant-toplevel`) and umount it explicitly at the end of
+/// `run`. Two bad properties followed: a hard-killed previous run
+/// could leave the mount in place and the next invocation would trip
+/// `EBUSY` on the fresh `mount(2)` call (the self-heal `umount` was
+/// best-effort, the real `mount` was not retried), and a panic before
+/// the explicit unmount leaked the mount entirely.
+///
+/// Switching to a fresh `tempfile::TempDir` per invocation removes
+/// both: every run gets a unique target so collisions are impossible,
+/// and the unmount + dir removal hang off `Drop`, so panics still
+/// clean up.
+struct ToplevelMount {
+    /// Owns the temp directory; `TempDir`'s own `Drop` removes it
+    /// after our `Drop` has umounted.
+    dir: tempfile::TempDir,
+    /// `false` once `Drop` has run, so a manual `drop(self)` followed
+    /// by an implicit drop doesn't double-umount. Not reachable in
+    /// today's code, but cheap insurance against future refactors.
+    mounted: bool,
+}
 
-    // Self-heal after a previous invocation that died before the
-    // matching `unmount_toplevel` ran (e.g. SIGPIPE from a broken
-    // stdout pipe). A leftover mount at our temp location would
-    // otherwise make the btrfs `mount` below fail with EBUSY.
-    if is_mount_point(&mount_point) {
-        tracing::warn!(
-            "stale mount at {} from a previous run; unmounting",
-            mount_point.display()
-        );
-        if let Err(e) = nix::mount::umount(&mount_point) {
-            tracing::warn!("failed to unmount stale {}: {e}", mount_point.display());
+impl ToplevelMount {
+    fn mount(config: &Config) -> Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("revenant-toplevel-")
+            .tempdir()
+            .context("failed to create temporary mount point")?;
+
+        let device = format!("/dev/disk/by-uuid/{}", config.sys.rootfs.device_uuid);
+        nix::mount::mount(
+            Some(device.as_str()),
+            dir.path(),
+            Some("btrfs"),
+            nix::mount::MsFlags::empty(),
+            Some("subvolid=5"),
+        )
+        .context("failed to mount btrfs top-level subvolume")?;
+
+        tracing::debug!("mounted top-level at {}", dir.path().display());
+        Ok(Self { dir, mounted: true })
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for ToplevelMount {
+    fn drop(&mut self) {
+        if !self.mounted {
+            return;
         }
-    }
-
-    let device = format!("/dev/disk/by-uuid/{}", config.sys.rootfs.device_uuid);
-
-    nix::mount::mount(
-        Some(device.as_str()),
-        &mount_point,
-        Some("btrfs"),
-        nix::mount::MsFlags::empty(),
-        Some("subvolid=5"),
-    )
-    .context("failed to mount btrfs top-level subvolume")?;
-
-    tracing::debug!("mounted top-level at {}", mount_point.display());
-    Ok(mount_point)
-}
-
-/// Return `true` when `path` sits on a different filesystem than its
-/// parent directory — the classic stat-based mount-point check. Any
-/// stat error (missing parent, missing path) is treated as "not a
-/// mount point" so the caller falls through to a normal mount attempt.
-fn is_mount_point(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let (Ok(self_meta), Ok(parent_meta)) = (std::fs::metadata(path), std::fs::metadata(parent))
-    else {
-        return false;
-    };
-    self_meta.dev() != parent_meta.dev()
-}
-
-fn unmount_toplevel(mount_point: &Path) {
-    if let Err(e) = nix::mount::umount(mount_point) {
-        tracing::warn!("failed to unmount {}: {e}", mount_point.display());
-    }
-    if let Err(e) = std::fs::remove_dir(mount_point) {
-        tracing::debug!(
-            "failed to remove mount point {}: {e}",
-            mount_point.display()
-        );
+        self.mounted = false;
+        if let Err(e) = nix::mount::umount(self.dir.path()) {
+            tracing::warn!("failed to unmount {}: {e}", self.dir.path().display());
+        }
+        // The TempDir's own Drop removes the directory after we return.
     }
 }
 
@@ -578,13 +596,14 @@ fn cmd_check(mode: OutputMode, config_path: &Path) -> Result<()> {
     if config_ok {
         let config = Config::load(config_path).context("failed to load configuration")?;
         let backend = BtrfsBackend::new();
-        let toplevel = mount_toplevel(&config)?;
+        let toplevel = ToplevelMount::mount(&config)?;
+        let toplevel_path = toplevel.path();
 
-        let orphans = check::find_orphaned_snapshots(&config, &backend, &toplevel);
-        let orphan_sidecars = check::find_orphaned_sidecars(&config, &backend, &toplevel);
-        let nested = check::find_nested_subvolumes(&config, &backend, &toplevel);
+        let orphans = check::find_orphaned_snapshots(&config, &backend, toplevel_path);
+        let orphan_sidecars = check::find_orphaned_sidecars(&config, &backend, toplevel_path);
+        let nested = check::find_nested_subvolumes(&config, &backend, toplevel_path);
 
-        unmount_toplevel(&toplevel);
+        drop(toplevel);
 
         match orphans {
             Ok(f) => findings.extend(f),

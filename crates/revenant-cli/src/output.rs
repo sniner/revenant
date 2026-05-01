@@ -14,7 +14,7 @@ use serde::Serialize;
 use revenant_core::check::{Finding, Severity};
 use revenant_core::cleanup::{CleanupSummary, PlanAction, RetentionPlan};
 use revenant_core::config::RetainConfig;
-use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
+use revenant_core::metadata::{SnapshotMetadata, TriggerKind, format_message_items};
 use revenant_core::snapshot::{LiveParentRef, SnapshotId, qualified};
 use revenant_core::{Config, SnapshotInfo};
 
@@ -66,18 +66,6 @@ fn metadata_summary(meta: &SnapshotMetadata) -> String {
     match format_message_items(&meta.message) {
         Some(s) => format!("{kind}: {s}"),
         None => kind.to_string(),
-    }
-}
-
-/// Join a metadata message vector into a single human-readable string,
-/// truncating long lists to keep the summary one line. Returns `None`
-/// if the list is empty so callers can suppress the entire detail
-/// segment cleanly.
-fn format_message_items(items: &[String]) -> Option<String> {
-    match items.len() {
-        0 => None,
-        1..=3 => Some(items.join(", ")),
-        _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
     }
 }
 

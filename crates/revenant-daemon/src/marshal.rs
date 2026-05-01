@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use revenant_core::cleanup::Tombstone;
-use revenant_core::metadata::{SnapshotMetadata, TriggerKind};
+use revenant_core::metadata::SnapshotMetadata;
 use revenant_core::{LiveParentRef, RetainConfig, SnapshotInfo, StrainConfig};
 use zvariant::{OwnedValue, Value};
 
@@ -106,18 +106,10 @@ pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {
 }
 
 fn trigger_and_message(meta: Option<&SnapshotMetadata>) -> (&'static str, &[String]) {
-    let Some(meta) = meta else {
-        return ("unknown", &[]);
-    };
-    let trigger = match meta.trigger {
-        TriggerKind::Manual => "manual",
-        TriggerKind::Pacman => "pacman",
-        TriggerKind::SystemdBoot => "systemd-boot",
-        TriggerKind::SystemdPeriodic => "systemd-periodic",
-        TriggerKind::Restore => "restore",
-        TriggerKind::Unknown => "unknown",
-    };
-    (trigger, meta.message.as_slice())
+    match meta {
+        Some(m) => (m.trigger.as_wire_str(), m.message.as_slice()),
+        None => ("unknown", &[]),
+    }
 }
 
 // ---- low-level encoding helpers ----------------------------------------

@@ -18,6 +18,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use revenant_core::metadata::format_message_items;
+
 use crate::dbus_thread::{Command, Event, Handles};
 use crate::model::{LiveParent, Retention, Snapshot, Strain, StrainStats, Tombstone};
 
@@ -1136,17 +1138,6 @@ fn kv_pair(key: &str, value: &str) -> gtk::Box {
     row.append(&k);
     row.append(&v);
     row
-}
-
-/// Join a snapshot's metadata `message` into a human-readable summary,
-/// truncating long lists to keep the line scannable. Returns `None`
-/// for an empty list so callers can suppress the row entirely.
-fn format_message_items(items: &[String]) -> Option<String> {
-    match items.len() {
-        0 => None,
-        1..=3 => Some(items.join(", ")),
-        _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
-    }
 }
 
 /// Build the sidebar subtitle for one strain. Spells the count and

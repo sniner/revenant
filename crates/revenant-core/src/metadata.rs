@@ -43,6 +43,39 @@ pub enum TriggerKind {
     Unknown,
 }
 
+impl TriggerKind {
+    /// Kebab-case identifier suitable for the D-Bus wire protocol and any
+    /// machine-readable surface. Mirrors the `serde(rename_all)` mapping
+    /// so that wire output stays in lockstep with the on-disk sidecar.
+    /// User-facing labels (e.g. CLI's "pre-restore") are intentionally
+    /// rendered separately by the display layer.
+    #[must_use]
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Pacman => "pacman",
+            Self::SystemdBoot => "systemd-boot",
+            Self::SystemdPeriodic => "systemd-periodic",
+            Self::Restore => "restore",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Join a snapshot's metadata `message` into a single human-readable
+/// string, truncating long lists to keep the summary on one line.
+/// Returns `None` for an empty list so callers can suppress the entire
+/// detail segment cleanly. Shared between CLI and GUI so the truncation
+/// rule (`"a, b, +N"` for >3 items) stays in lockstep.
+#[must_use]
+pub fn format_message_items(items: &[String]) -> Option<String> {
+    match items.len() {
+        0 => None,
+        1..=3 => Some(items.join(", ")),
+        _ => Some(format!("{}, {}, +{}", items[0], items[1], items.len() - 2)),
+    }
+}
+
 /// Full metadata record written alongside a snapshot.
 ///
 /// `message` is a free-form list of strings whose meaning depends on the

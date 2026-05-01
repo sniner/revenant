@@ -75,6 +75,12 @@ pub fn snapshot_to_dict(
     );
     insert_bool(&mut d, "is_live_anchor", is_anchor)?;
 
+    // Always emit `protected` so clients can dispatch on its presence
+    // alone — the value is `false` for snapshots without a sidecar or
+    // with the flag unset, mirroring the in-process semantics.
+    let protected = snap.metadata.as_ref().is_some_and(|m| m.protected);
+    insert_bool(&mut d, "protected", protected)?;
+
     Ok(d)
 }
 

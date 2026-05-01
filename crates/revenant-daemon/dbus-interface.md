@@ -55,6 +55,7 @@ UPower) rather than the systemd1/UDisks2 style of versioning the service name.
 | `dev.sniner.Revenant.config.edit`     | `auth_admin_keep`   | Cached.                                |
 | `dev.sniner.Revenant.restore`         | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
 | `dev.sniner.Revenant.cleanup`         | `auth_admin_keep`   | Purges pre-restore DELETE markers.     |
+| `dev.sniner.Revenant.snapshot.protect`| `auth_admin_keep`   | Toggles the `protected` sidecar flag.  |
 
 The polkit policy file ships in `data/dev.sniner.Revenant.policy` and is
 installed to `/usr/share/polkit-1/actions/`.
@@ -97,6 +98,7 @@ Defined keys (initial set):
 | `trigger`          | `s`  | `manual` \| `pacman` \| `systemd-boot` \| `systemd-periodic` \| `restore` \| `unknown`. |
 | `message`          | `as` | Trigger-dependent list. `manual`: user note(s). `pacman`: package names. `systemd-boot`/`-periodic`: unit name. `restore`: source snapshot reference (`strain@id`). Omitted entirely if empty. |
 | `is_live_anchor`   | `b`  | True if this snapshot is the parent of the live rootfs (mirror of CLI `*` marker; matches `revenant_core::snapshot::resolve_live_parent`). |
+| `protected`        | `b`  | Mirror of the sidecar `protected` flag. Always present; `false` for snapshots without a sidecar or with the flag unset. Protected snapshots are excluded from retention and refuse `DeleteSnapshot` until cleared via `SetSnapshotProtected(_, _, false)`. |
 | `size_bytes`       | `t`  | Best-effort size; `0` if unknown.                        |
 
 ### `LiveParent` — `a{sv}`
@@ -151,6 +153,9 @@ GetSnapshot(strain: s, id: s) -> (a{sv})
 CreateSnapshot(strain: s, message: as) -> (a{sv}) -- privileged: dev.sniner.Revenant.snapshot.create
                                                   --   returns the new Snapshot dict
 DeleteSnapshot(strain: s, id: s) -> ()           -- privileged: dev.sniner.Revenant.snapshot.delete
+SetSnapshotProtected(strain: s, id: s, protected: b) -> (a{sv})
+                                                  -- privileged: dev.sniner.Revenant.snapshot.protect
+                                                  --   returns the updated Snapshot dict
 ```
 
 `CreateSnapshot` and `DeleteSnapshot` complete well under a second
@@ -160,6 +165,17 @@ on btrfs, so they return synchronously rather than going through the
 operations cause the inotify watcher to fire `SnapshotsChanged`, which
 is how unprivileged subscribers learn about the change — the methods do
 not emit anything themselves.
+
+`DeleteSnapshot` raises `dev.sniner.Revenant.Error.ProtectedSnapshot`
+when the target carries `protected = true`. Clients should use that as
+the cue to surface the "unprotect first" remediation (rather than a
+generic error toast).
+
+`SetSnapshotProtected` rewrites the sidecar in place via the same
+atomic write path as `CreateSnapshot`. The inotify watcher then fires
+`SnapshotsChanged(strain)` — no extra signal is emitted. Returns the
+refreshed Snapshot dict so the caller can update its view in one
+round-trip.
 
 ### Pre-restore states (DELETE markers)
 
@@ -274,6 +290,7 @@ back to a variant of `revenant_core::RevenantError`:
 | `dev.sniner.Revenant.Error.NotFound`              | unknown strain or snapshot id      |
 | `dev.sniner.Revenant.Error.InvalidArgument`       | malformed input                    |
 | `dev.sniner.Revenant.Error.PreflightBlocked`      | restore preflight reported `Severity::Error` findings |
+| `dev.sniner.Revenant.Error.ProtectedSnapshot`     | delete refused — sidecar `protected = true`; unprotect first |
 | `dev.sniner.Revenant.Error.Conflict`              | concurrent operation in progress   |
 | `dev.sniner.Revenant.Error.BackendUnavailable`    | toplevel not mounted, btrfs missing |
 | `dev.sniner.Revenant.Error.Internal`              | catch-all; details in message      |

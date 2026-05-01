@@ -44,6 +44,16 @@
     </defaults>
   </action>
 
+  <action id="dev.sniner.Revenant.snapshot.protect">
+    <description>Change snapshot protection state</description>
+    <message>Authentication is required to protect or unprotect a snapshot.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
   <action id="dev.sniner.Revenant.config.edit">
     <description>Modify revenant configuration (e.g. retention policy)</description>
     <message>Authentication is required to change the snapshot configuration.</message>

@@ -9,6 +9,8 @@
 //! 5. `CreateSnapshot` / `DeleteSnapshot`, both synchronous.
 //! 6. `Restore` (synchronous, with `save_current` + preflight +
 //!    `LiveParentChanged`).
+//! 7. `SetSnapshotProtected` — sidecar flag toggle, returns the
+//!    refreshed Snapshot dict; inotify carries the change-out signal.
 //!
 //! See `crates/revenant-daemon/dbus-interface.md` for the wire-level contract.
 
@@ -22,8 +24,9 @@ use revenant_core::metadata::TriggerKind;
 use revenant_core::preflight::{MACHINED_RUNTIME_DIR, preflight_restore};
 use revenant_core::restore::restore_snapshot as core_restore_snapshot;
 use revenant_core::snapshot::{
-    create_snapshot as core_create_snapshot, delete_snapshot as core_delete_snapshot,
-    discover_snapshots, find_snapshot, resolve_live_parent,
+    MetadataPatch, create_snapshot as core_create_snapshot,
+    delete_snapshot as core_delete_snapshot, discover_snapshots, find_snapshot,
+    resolve_live_parent, update_snapshot_metadata,
 };
 use revenant_core::{RetainConfig, RevenantError, SnapshotId};
 use zbus::interface;
@@ -271,6 +274,63 @@ impl Daemon {
         Ok(())
     }
 
+    /// Set or clear the protected flag on an existing snapshot.
+    ///
+    /// Returns the updated snapshot dict (same shape as
+    /// `GetSnapshot`/`ListSnapshots`) so the caller can refresh its
+    /// view in one round-trip. The sidecar write fires the inotify
+    /// watcher, which broadcasts `SnapshotsChanged(strain)` to every
+    /// subscriber — no extra signal is emitted here.
+    ///
+    /// Polkit action: `dev.sniner.Revenant.snapshot.protect`
+    /// (`auth_admin_keep`, mirroring `snapshot.delete`).
+    async fn set_snapshot_protected(
+        &self,
+        strain: &str,
+        id: &str,
+        protected: bool,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> Result<Dict, DaemonError> {
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
+        polkit::check(
+            conn,
+            sender.as_str(),
+            "dev.sniner.Revenant.snapshot.protect",
+        )
+        .await?;
+
+        let ready = self.state.ready().await?;
+        let snap_id = SnapshotId::from_string(id)
+            .map_err(|e| DaemonError::InvalidArgument(format!("invalid snapshot id {id}: {e}")))?;
+        let snapshot = find_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snap_id,
+            Some(strain),
+        )
+        .map_err(map_core_error)?;
+
+        let updated = update_snapshot_metadata(
+            ready.config(),
+            ready.toplevel(),
+            &snapshot,
+            &MetadataPatch {
+                protected: Some(protected),
+                message: None,
+            },
+        )
+        .map_err(map_core_error)?;
+
+        let mut snapshot = snapshot;
+        snapshot.metadata = Some(updated);
+        let live = resolve_live_parent(ready.config(), &self.state.backend, ready.toplevel());
+        snapshot_to_dict(&snapshot, live.as_ref())
+    }
+
     // -- Pre-restore states (tombstones) -------------------------------
     //
     // External D-Bus API: ListDeleteMarkers / PurgeDeleteMarkers /
@@ -516,6 +576,7 @@ fn map_core_error(err: RevenantError) -> DaemonError {
             DaemonError::BackendUnavailable(err.to_string())
         }
         RevenantError::NotRoot => DaemonError::NotAuthorized(err.to_string()),
+        RevenantError::ProtectedSnapshot { .. } => DaemonError::ProtectedSnapshot(err.to_string()),
         _ => DaemonError::Internal(err.to_string()),
     }
 }

@@ -41,6 +41,12 @@ pub enum DaemonError {
     /// it to the user before retrying.
     PreflightBlocked(String),
 
+    /// Operation was refused because the target snapshot carries the
+    /// `protected = true` sidecar flag. Dispatched separately from
+    /// `Conflict`/`InvalidArgument` so clients can surface the
+    /// "unprotect first" remediation directly.
+    ProtectedSnapshot(String),
+
     /// Reserved for future serialization conflicts on write paths
     /// (e.g. a second `Restore` while one is in flight). Not yet
     /// emitted — write-path serialization is still a TODO.
@@ -83,6 +89,10 @@ mod tests {
             (
                 DaemonError::PreflightBlocked("x".into()),
                 "dev.sniner.Revenant.Error.PreflightBlocked",
+            ),
+            (
+                DaemonError::ProtectedSnapshot("x".into()),
+                "dev.sniner.Revenant.Error.ProtectedSnapshot",
             ),
             (
                 DaemonError::Conflict("x".into()),

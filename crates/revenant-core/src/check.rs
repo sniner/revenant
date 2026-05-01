@@ -109,13 +109,7 @@ pub fn parse_snapshot_name(name: &str) -> Option<ParsedSnapshotName> {
     let last_dash = prefix.rfind('-')?;
     let subvol = &prefix[..last_dash];
     let strain = &prefix[last_dash + 1..];
-    if subvol.is_empty() || strain.is_empty() {
-        return None;
-    }
-    if !strain
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if subvol.is_empty() || !crate::config::is_strain_token_lexical(strain) {
         return None;
     }
     Some(ParsedSnapshotName {

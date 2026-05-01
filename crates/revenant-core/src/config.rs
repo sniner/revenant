@@ -169,13 +169,21 @@ pub struct StrainConfig {
 /// Must not be used as a real strain name in configuration.
 pub const DELETE_STRAIN: &str = "DELETE";
 
-/// Valid strain names: only alphanumeric and underscore. Hyphens are excluded
-/// because they appear in the snapshot naming scheme as delimiters, and the
-/// reserved name DELETE must not be usable.
-fn is_valid_strain_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != DELETE_STRAIN
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+/// Lexical predicate for a strain-style token: non-empty, only
+/// alphanumeric and underscore. Hyphens are excluded because they appear
+/// in the snapshot naming scheme as delimiters. Used by parsers that
+/// accept any structurally-valid token (sidecar file names, snapshot
+/// subvolume names) — they do not reject the reserved DELETE name
+/// because rejecting it is the caller's higher-level concern.
+pub(crate) fn is_strain_token_lexical(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Strict strain-name check: lexical + not the reserved DELETE marker.
+/// Used to validate user config and to distinguish snapshot subvolumes
+/// from tombstones during discovery.
+pub(crate) fn is_valid_strain_name(name: &str) -> bool {
+    is_strain_token_lexical(name) && name != DELETE_STRAIN
 }
 
 impl Config {

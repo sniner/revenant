@@ -233,7 +233,7 @@ impl FromStr for SnapshotTarget {
                         "missing strain before '@' in {s:?}"
                     )));
                 }
-                if !is_valid_strain_token(strain) {
+                if !crate::config::is_valid_strain_name(strain) {
                     return Err(RevenantError::Other(format!(
                         "invalid strain name {strain:?} in target — only [a-zA-Z0-9_] allowed"
                     )));
@@ -260,15 +260,6 @@ impl FromStr for SnapshotTarget {
             }
         }
     }
-}
-
-/// Local mirror of the strain-name predicate used by `Config::validate`.
-/// Duplicated here to avoid a `config` ↔ `snapshot` import dependency for
-/// what is a one-line predicate; the canonical rule lives in `config.rs`.
-fn is_valid_strain_token(s: &str) -> bool {
-    !s.is_empty()
-        && s != crate::config::DELETE_STRAIN
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Render `(strain, id)` as the canonical `strain@id` token used in

@@ -150,11 +150,7 @@ pub fn parse_sidecar_name(name: &str) -> Option<(String, String)> {
     let stem = name.strip_suffix(SIDECAR_EXTENSION)?;
     let (id, ts_start) = SnapshotId::extract_trailing(stem)?;
     let strain = &stem[..ts_start - 1];
-    if strain.is_empty()
-        || !strain
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if !crate::config::is_strain_token_lexical(strain) {
         return None;
     }
     Some((strain.to_string(), id.as_str().to_string()))

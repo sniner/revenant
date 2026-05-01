@@ -11,6 +11,24 @@ use crate::metadata;
 use crate::retention::{KeepReason, select_to_keep, select_to_keep_explained};
 use crate::snapshot::{self, SnapshotId, SnapshotInfo};
 
+/// Set of base subvolume names whose `<base>-DELETE-<ts>` tombstones are
+/// considered ours to enumerate or purge — the strain subvols plus the
+/// EFI staging subvol when EFI sync is enabled. Tombstones with any
+/// other prefix are ignored so a cleanup run never touches subvolumes
+/// outside revenant's surface area.
+fn collect_base_names(config: &Config) -> HashSet<&str> {
+    let mut base_names: HashSet<&str> = HashSet::new();
+    for sc in config.strain.values() {
+        for sv in &sc.subvolumes {
+            base_names.insert(sv.as_str());
+        }
+    }
+    if config.sys.efi.enabled {
+        base_names.insert(config.sys.efi.staging_subvol.as_str());
+    }
+    base_names
+}
+
 /// What the retention policy would do, without touching the filesystem.
 ///
 /// Built by [`plan_retention`] and rendered by the CLI's `--dry-run` path.
@@ -129,15 +147,7 @@ pub fn recover_orphaned_nested_subvols(
     // Same base-name set as `purge_all_tombstones`: only tombstones
     // whose prefix matches a known strain subvol (or the EFI staging
     // subvol) are considered ours to touch.
-    let mut base_names: HashSet<&str> = HashSet::new();
-    for sc in config.strain.values() {
-        for sv in &sc.subvolumes {
-            base_names.insert(sv.as_str());
-        }
-    }
-    if config.sys.efi.enabled {
-        base_names.insert(config.sys.efi.staging_subvol.as_str());
-    }
+    let base_names = collect_base_names(config);
 
     let all_subvols = backend.list_subvolumes(toplevel)?;
     let mut recovered = 0usize;
@@ -245,16 +255,7 @@ pub fn purge_all_tombstones(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<Vec<String>> {
-    // Collect all base subvol names known to the config
-    let mut base_names: HashSet<&str> = HashSet::new();
-    for strain_config in config.strain.values() {
-        for sv in &strain_config.subvolumes {
-            base_names.insert(sv.as_str());
-        }
-    }
-    if config.sys.efi.enabled {
-        base_names.insert(config.sys.efi.staging_subvol.as_str());
-    }
+    let base_names = collect_base_names(config);
 
     let all_subvols = backend.list_subvolumes(toplevel)?;
     let mut removed = Vec::new();
@@ -424,15 +425,7 @@ pub fn list_tombstones(
     backend: &dyn FileSystemBackend,
     toplevel: &Path,
 ) -> Result<Vec<Tombstone>> {
-    let mut base_names: HashSet<&str> = HashSet::new();
-    for strain_config in config.strain.values() {
-        for sv in &strain_config.subvolumes {
-            base_names.insert(sv.as_str());
-        }
-    }
-    if config.sys.efi.enabled {
-        base_names.insert(config.sys.efi.staging_subvol.as_str());
-    }
+    let base_names = collect_base_names(config);
 
     let max_age_days = config.sys.tombstone_max_age_days;
 

@@ -598,23 +598,11 @@ fn read_bool_opt(d: &Dict, key: &str) -> Option<bool> {
     d.get(key).and_then(|v| bool::try_from(v).ok())
 }
 
-/// Append `findings` as `aa{sv}` under the `findings` key. Always
-/// emits the key, even for an empty array — the GUI can rely on its
-/// presence rather than checking for absence.
+/// Attach `findings` (already wire-encoded) to `out` under the
+/// `findings` key. Always emits the key, even for an empty array —
+/// the GUI can rely on its presence rather than checking for absence.
 fn attach_findings(out: &mut Dict, findings: &[Finding]) -> Result<(), DaemonError> {
-    let encoded: Vec<Dict> = findings
-        .iter()
-        .map(|f| {
-            let mut d = Dict::new();
-            marshal::insert_str(&mut d, "severity", f.severity.label())?;
-            marshal::insert_str(&mut d, "check", f.check)?;
-            marshal::insert_str(&mut d, "message", &f.message)?;
-            if let Some(hint) = &f.hint {
-                marshal::insert_str(&mut d, "hint", hint)?;
-            }
-            Ok::<_, DaemonError>(d)
-        })
-        .collect::<Result<_, DaemonError>>()?;
+    let encoded = marshal::findings_to_vec(findings)?;
     let value = Value::from(encoded)
         .try_to_owned()
         .map_err(|e| DaemonError::Internal(format!("encode findings: {e}")))?;

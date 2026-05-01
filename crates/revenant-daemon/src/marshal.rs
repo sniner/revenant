@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use revenant_core::check::Finding;
 use revenant_core::cleanup::Tombstone;
 use revenant_core::metadata::SnapshotMetadata;
 use revenant_core::{LiveParentRef, RetainConfig, SnapshotInfo, StrainConfig};
@@ -96,6 +97,26 @@ pub fn tombstone_to_dict(t: &Tombstone) -> DaemonResult<Dict> {
         insert_str(&mut d, "expires_at", &e.to_rfc3339())?;
     }
     Ok(d)
+}
+
+/// Encode preflight findings as `aa{sv}` (a list of dicts). Sister to
+/// the other `*_to_*` converters; lives here so the wire shape of
+/// `findings` is defined in the same module as the snapshot/strain/
+/// tombstone shapes.
+pub fn findings_to_vec(findings: &[Finding]) -> DaemonResult<Vec<Dict>> {
+    findings
+        .iter()
+        .map(|f| {
+            let mut d = Dict::new();
+            insert_str(&mut d, "severity", f.severity.label())?;
+            insert_str(&mut d, "check", f.check)?;
+            insert_str(&mut d, "message", &f.message)?;
+            if let Some(hint) = &f.hint {
+                insert_str(&mut d, "hint", hint)?;
+            }
+            Ok(d)
+        })
+        .collect()
 }
 
 pub fn live_parent_to_dict(lp: &LiveParentRef) -> DaemonResult<Dict> {

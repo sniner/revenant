@@ -185,13 +185,19 @@ fn open_stream(
 /// Map an inotify event name to a strain, if it parses as a snapshot
 /// subvolume or a sidecar file. Returns `None` for events on the
 /// directory itself, anonymous events, or names that don't fit either
-/// shape — those force a fallback "any" emission.
+/// shape — those force a fallback "any" emission. The unparseable case
+/// is logged at debug level so its frequency can be inspected without
+/// turning info-level traffic into noise.
 fn classify_event(name: Option<&OsStr>) -> Option<String> {
-    let name = name?.to_str()?;
-    if let Some((strain, _id)) = parse_sidecar_name(name) {
+    let raw = name?.to_str()?;
+    if let Some((strain, _id)) = parse_sidecar_name(raw) {
         return Some(strain);
     }
-    parse_snapshot_subvol_name(name).map(|(_subvol, strain, _id)| strain)
+    if let Some((_subvol, strain, _id)) = parse_snapshot_subvol_name(raw) {
+        return Some(strain);
+    }
+    tracing::debug!(name = %raw, "watcher: event name did not parse as snapshot or sidecar");
+    None
 }
 
 /// Resolve the `Option<Instant>` deadline into a future that pends

@@ -4,5 +4,6 @@
 //! helpers by concern so `main.rs` itself stays focused on app-level
 //! plumbing (`AppState`, `Widgets`, the event loop).
 
+pub mod dialogs;
 pub mod format;
 pub mod toast;

@@ -10,13 +10,6 @@
 # The two resulting .pkg.tar.zst files (revenant + revenant-gui) end
 # up next to this PKGBUILD.
 #
-# A custom application icon is still on the TODO list — the .desktop
-# file currently falls back to the standard `document-revert` theme
-# icon. When a proper SVG ships under
-# `data/dev.sniner.RevenantGui.svg`, install it under
-# `/usr/share/icons/hicolor/scalable/apps/` and switch the .desktop
-# `Icon=` line to `dev.sniner.RevenantGui`.
-
 pkgbase=revenant
 pkgname=(revenant revenant-gui)
 # pkgver is auto-derived from the workspace Cargo.toml by the
@@ -118,6 +111,12 @@ package_revenant-gui() {
     # correlate the running window with this .desktop file.
     install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.RevenantGui.desktop" \
         "$pkgdir/usr/share/applications/dev.sniner.RevenantGui.desktop"
+
+    # Application icon. Hicolor/scalable is the canonical fallback
+    # location every freedesktop icon theme inherits from, so the
+    # icon shows up regardless of which theme the user runs.
+    install -Dm644 "$srcdir/$pkgbase/data/dev.sniner.RevenantGui.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.sniner.RevenantGui.svg"
 
     # systemd unit. /usr/lib/systemd/system is the vendor location;
     # pacman's systemd hook triggers daemon-reload automatically.

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>Revenant — first draft</title>
+
+  <!-- Three stacked snapshot layers, offset up-and-right by 10px each.
+       Light-to-dark blue: the back two layers read as "earlier
+       snapshots", the front (saturated Adwaita blue) as "now". -->
+  <g stroke="#1a3a6a" stroke-width="3" stroke-linejoin="round">
+    <rect x="36" y="20" width="76" height="76" rx="14" fill="#cfe1f5"/>
+    <rect x="26" y="28" width="76" height="76" rx="14" fill="#7da9d8"/>
+    <rect x="16" y="36" width="76" height="76" rx="14" fill="#1c71d8"/>
+  </g>
+
+  <!-- Counter-clockwise restore arrow on the front layer.
+       Front-layer centre = (54, 74), arc radius = 20.
+       Path starts at the top of the circle (54, 54) and sweeps CCW
+       (sweep=0, large-arc=1) through the left and bottom, ending at
+       the right of the circle (74, 74). The arrowhead at the right
+       end points upward — tangent direction at that point under CCW
+       motion — so the eye reads "going back". -->
+  <path d="M 54 54 A 20 20 0 1 0 74 74"
+        stroke="#ffffff" stroke-width="7"
+        fill="none" stroke-linecap="round"/>
+  <polygon points="74,62 66,76 82,76" fill="#ffffff"/>
+</svg>

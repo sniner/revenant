@@ -17,9 +17,13 @@
 #   * polkit reload — polkitd watches /usr/share/polkit-1/actions and
 #     reloads on inotify.
 #   * enable/start the daemon — D-Bus activation starts it on demand
-#     when the GUI (or any client) makes the first method call. If a
-#     user wants it always running, `systemctl enable --now
-#     revenant-daemon.service` is their call.
+#     when the GUI (or any client) makes the first method call.
+#     Periodic snapshots come from `revenant-periodic.timer` driving
+#     the CLI (`revenantctl`); they do not depend on the daemon at
+#     all. There is therefore no reason to manually enable
+#     revenant-daemon.service — `systemctl enable --now
+#     revenant-daemon.service` is offered only for users who prefer
+#     the daemon to be already up before the first GUI launch.
 
 _dbus_reload() {
     # Either dbus.service or dbus-broker.service may be active

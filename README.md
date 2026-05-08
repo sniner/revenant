@@ -337,6 +337,11 @@ sudo systemctl enable revenant-boot.service
 sudo systemctl enable --now revenant-periodic.timer
 ```
 
+These units drive `revenantctl` directly and are independent of
+`revenant-daemon`. The daemon is only needed for the GUI and is started
+on demand via D-Bus activation; there is no need to `systemctl enable`
+it for periodic or boot snapshots to work.
+
 The timer interval and periodic strain name are configurable:
 
 ```sh

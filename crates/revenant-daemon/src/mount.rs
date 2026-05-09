@@ -2,8 +2,17 @@
 //!
 //! The daemon owns the btrfs toplevel mount for its entire runtime —
 //! unlike the CLI, which mounts and umounts per command. Mount target
-//! is `/run/revenant/toplevel`. The unit file (`PrivateMounts=true`)
-//! keeps the mount inside the daemon's own namespace.
+//! is `/run/revenant/toplevel`. The unit runs in the host's mount
+//! namespace (no `ProtectSystem=`/`PrivateMounts=`/etc.), so this
+//! mount and the per-snapshot ones in `snapshot_mount.rs` are
+//! visible everywhere, including the user's file manager. Privacy
+//! of the toplevel is enforced via mode 0700 on `/run/revenant/`;
+//! non-root users cannot traverse in regardless of whether the
+//! mount appears in /proc/mounts.
+//!
+//! A hard daemon kill leaves the toplevel mount on the host: the
+//! `is_mount_point` / stale-cleanup branch below is therefore
+//! load-bearing rather than belt-and-suspenders.
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -28,10 +37,8 @@ impl ToplevelMount {
     /// over from a hard daemon kill.
     pub fn mount(config: &Config) -> Result<Self> {
         let mount_point = PathBuf::from(TOPLEVEL_MOUNT_POINT);
-        // 0700 on both the parent and the mount point so non-root users
-        // cannot traverse into the daemon's mount tree. Matters most for
-        // dev runs without `PrivateMounts=true`; defense-in-depth under
-        // systemd.
+        // 0700 on both the parent and the mount point: this is the
+        // sole access barrier now that the mount is host-visible.
         if let Some(parent) = mount_point.parent() {
             ensure_private_dir(parent)?;
         }

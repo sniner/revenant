@@ -142,6 +142,21 @@ pub enum Event {
     /// subset of the requested names if a concurrent CLI cleanup beat
     /// us to some).
     PurgeTombstonesResult(Result<Vec<String>, String>),
+    /// Result of a privileged `MountSnapshot` call. The map carries
+    /// `subvol_name -> mount_path` for every subvolume of the
+    /// snapshot. The GUI uses any value's parent directory as the
+    /// path to launch the file manager on.
+    MountSnapshotResult {
+        strain: String,
+        id: String,
+        result: Result<HashMap<String, String>, String>,
+    },
+    /// Result of a privileged `UnmountSnapshot` call.
+    UnmountSnapshotResult {
+        strain: String,
+        id: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Commands sent from the GUI to the worker.
@@ -191,6 +206,13 @@ pub enum Command {
     /// `Event::PurgeTombstonesResult`. Polkit prompt happens inside
     /// the daemon.
     PurgeTombstones(Vec<String>),
+    /// Issue a privileged `MountSnapshot` call. Worker replies with
+    /// `Event::MountSnapshotResult` carrying the per-subvol mount
+    /// paths so the GUI can open the file manager on the snapshot.
+    MountSnapshot { strain: String, id: String },
+    /// Issue a privileged `UnmountSnapshot` call. Worker replies with
+    /// `Event::UnmountSnapshotResult`.
+    UnmountSnapshot { strain: String, id: String },
 }
 
 /// Worker handle returned to the GUI thread.
@@ -521,6 +543,26 @@ async fn handle_command(client: &Client, evt_tx: &Sender<Event>, cmd: Command) {
                 .await
                 .map_err(|e| format!("{e}"));
             let _ = evt_tx.send(Event::PurgeTombstonesResult(result)).await;
+        }
+        Command::MountSnapshot { strain, id } => {
+            let result = client
+                .proxy()
+                .mount_snapshot(&strain, &id)
+                .await
+                .map_err(|e| format!("{e}"));
+            let _ = evt_tx
+                .send(Event::MountSnapshotResult { strain, id, result })
+                .await;
+        }
+        Command::UnmountSnapshot { strain, id } => {
+            let result = client
+                .proxy()
+                .unmount_snapshot(&strain, &id)
+                .await
+                .map_err(|e| format!("{e}"));
+            let _ = evt_tx
+                .send(Event::UnmountSnapshotResult { strain, id, result })
+                .await;
         }
     }
 }

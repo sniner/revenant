@@ -11,6 +11,8 @@
 //!    `LiveParentChanged`).
 //! 7. `SetSnapshotProtected` — sidecar flag toggle, returns the
 //!    refreshed Snapshot dict; inotify carries the change-out signal.
+//! 8. `MountSnapshot` / `UnmountSnapshot` — per-snapshot read-only
+//!    user-facing mounts under `/run/user/<uid>/revenant/mounts/`.
 //!
 //! See `crates/revenant-daemon/dbus-interface.md` for the wire-level contract.
 
@@ -29,6 +31,8 @@ use revenant_core::snapshot::{
     resolve_live_parent, update_snapshot_metadata,
 };
 use revenant_core::{RetainConfig, RevenantError, SnapshotId};
+use std::collections::HashMap;
+use zbus::fdo;
 use zbus::interface;
 use zvariant::Value;
 
@@ -39,6 +43,7 @@ use crate::marshal::{
     tombstone_to_dict,
 };
 use crate::polkit;
+use crate::snapshot_mount::resolve_primary_gid;
 use crate::state::DaemonState;
 
 pub struct Daemon {
@@ -318,6 +323,79 @@ impl Daemon {
         snapshot_to_dict(&snapshot, live.as_ref())
     }
 
+    // -- User-facing snapshot mounts -----------------------------------
+    //
+    // Browse-only: every subvolume of the snapshot is mounted
+    // read-only under `/run/user/<uid>/revenant/mounts/<strain>-<id>/`,
+    // one subdirectory per subvolume. The same polkit action covers
+    // mount and unmount — whoever was allowed to ask the daemon to
+    // mount is allowed to ask for the unmount, too.
+
+    /// Mount every subvolume of the snapshot read-only. Returns a
+    /// `subvol_name -> mount_path` map. Idempotent: calling this
+    /// again for an already-mounted snapshot just refreshes its
+    /// idle clock and returns the existing paths.
+    async fn mount_snapshot(
+        &self,
+        strain: &str,
+        id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> Result<HashMap<String, String>, DaemonError> {
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.snapshot.mount",
+            Some(&signal_emitter),
+        )
+        .await?;
+
+        let uid = caller_uid(conn, &hdr).await?;
+        let gid = resolve_primary_gid(uid);
+
+        let ready = self.state.ready().await?;
+        let snap_id = SnapshotId::from_string(id)
+            .map_err(|e| DaemonError::InvalidArgument(format!("invalid snapshot id {id}: {e}")))?;
+        let snapshot = find_snapshot(
+            ready.config(),
+            &self.state.backend,
+            ready.toplevel(),
+            &snap_id,
+            Some(strain),
+        )
+        .map_err(map_core_error)?;
+
+        self.state
+            .snapshot_mounts
+            .mount_snapshot(ready.config(), &snapshot, uid, gid)
+            .map_err(|e| DaemonError::Internal(format!("mount snapshot {strain}@{id}: {e:#}")))
+    }
+
+    /// Unmount every subvolume of the snapshot. Idempotent for
+    /// snapshots that aren't currently mounted.
+    async fn unmount_snapshot(
+        &self,
+        strain: &str,
+        id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(signal_emitter)] signal_emitter: zbus::object_server::SignalEmitter<'_>,
+    ) -> Result<(), DaemonError> {
+        authorize(
+            conn,
+            &hdr,
+            "dev.sniner.Revenant.snapshot.mount",
+            Some(&signal_emitter),
+        )
+        .await?;
+
+        self.state
+            .snapshot_mounts
+            .unmount_snapshot(strain, id)
+            .map_err(|e| DaemonError::Internal(format!("unmount snapshot {strain}@{id}: {e:#}")))
+    }
+
     // -- Pre-restore states (tombstones) -------------------------------
     //
     // External D-Bus API: ListDeleteMarkers / PurgeDeleteMarkers /
@@ -572,6 +650,25 @@ async fn authorize(
         tracing::warn!("emit OperationStarted({action}): {e}");
     }
     Ok(())
+}
+
+/// Resolve the caller's UNIX uid from the message header's bus name
+/// via `org.freedesktop.DBus.GetConnectionUnixUser`. Used by the
+/// user-facing mount handlers so the per-uid mount tree under
+/// `/run/user/<uid>/` lands on the right session.
+async fn caller_uid(
+    conn: &zbus::Connection,
+    hdr: &zbus::message::Header<'_>,
+) -> Result<u32, DaemonError> {
+    let sender = hdr
+        .sender()
+        .ok_or_else(|| DaemonError::Internal("method call has no sender".into()))?;
+    let bus = fdo::DBusProxy::new(conn)
+        .await
+        .map_err(|e| DaemonError::Internal(format!("dbus proxy: {e}")))?;
+    bus.get_connection_unix_user(sender.to_owned().into())
+        .await
+        .map_err(|e| DaemonError::Internal(format!("get_connection_unix_user: {e}")))
 }
 
 /// Map a `revenant-core` error onto the closest custom D-Bus error.

@@ -131,6 +131,24 @@ fn snapshot_row(
         })
         .css_classes(["flat", "circular"])
         .build();
+    // Mount toggle: pressed = read-only mount held by the daemon,
+    // unpressed = no mount. Initial state and sensitivity come from
+    // AppState so a row rebuild after a click reflects the truth
+    // (mounted_snapshots) rather than starting fresh.
+    let key = (snap.strain.clone(), snap.id.clone());
+    let already_mounted = state.borrow().mounted_snapshots.contains(&key);
+    let in_flight = state.borrow().mount_in_flight.contains(&key);
+    let mount_btn = gtk::ToggleButton::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text(if already_mounted {
+            "Mounted read-only — click to unmount"
+        } else {
+            "Mount read-only and open in file manager"
+        })
+        .css_classes(["flat", "circular"])
+        .active(already_mounted)
+        .sensitive(!in_flight)
+        .build();
     let restore_btn = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Restore snapshot")
@@ -165,6 +183,7 @@ fn snapshot_row(
         .hexpand(true)
         .build();
     headline.append(&spacer);
+    headline.append(&mount_btn);
     headline.append(&lock_btn);
     headline.append(&restore_btn);
     headline.append(&delete_btn);
@@ -200,6 +219,38 @@ fn snapshot_row(
     }
 
     let row = gtk::ListBoxRow::builder().child(&body).build();
+
+    {
+        // Mount toggle. GTK auto-flips `is_active()` on click; we read
+        // the *new* state and dispatch the matching command. Setting
+        // `sensitive=false` prevents a second click before the result
+        // round-trip lands. The result handler in `ui::mount` reloads
+        // the strain so the row rebuilds with the truth.
+        let snap = snap.clone();
+        let state_for_cb = Rc::clone(state);
+        let cmd_tx = cmd_tx.clone();
+        mount_btn.connect_clicked(move |btn| {
+            let key = (snap.strain.clone(), snap.id.clone());
+            {
+                let mut st = state_for_cb.borrow_mut();
+                if !st.mount_in_flight.insert(key.clone()) {
+                    return;
+                }
+            }
+            btn.set_sensitive(false);
+            if btn.is_active() {
+                let _ = cmd_tx.send_blocking(Command::MountSnapshot {
+                    strain: snap.strain.clone(),
+                    id: snap.id.clone(),
+                });
+            } else {
+                let _ = cmd_tx.send_blocking(Command::UnmountSnapshot {
+                    strain: snap.strain.clone(),
+                    id: snap.id.clone(),
+                });
+            }
+        });
+    }
 
     {
         let snap = snap.clone();

@@ -13,7 +13,7 @@ mod proxy;
 mod ui;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -31,6 +31,7 @@ use crate::ui::dialogs::delete::{
 use crate::ui::dialogs::restore::apply_restore_result;
 use crate::ui::dialogs::retention::{apply_retention_result, present_retention_dialog};
 use crate::ui::format::show_error_toast;
+use crate::ui::mount::{apply_mount_snapshot_result, apply_unmount_snapshot_result};
 use crate::ui::snapshots::apply_snapshots;
 use crate::ui::strains::{apply_all_snapshots, apply_strains, select_strain};
 use crate::ui::toast::{ProgressToast, apply_operation_started};
@@ -95,6 +96,14 @@ pub(crate) struct AppState {
     pub(crate) purge_in_flight: bool,
     /// Toast displayed while a purge is being processed.
     pub(crate) purge_progress_toast: Option<ProgressToast>,
+    /// Snapshots that the daemon currently has mounted read-only on
+    /// our behalf. Drives the per-row mount-toggle's active state.
+    /// Keyed by `(strain, id)`.
+    pub(crate) mounted_snapshots: HashSet<(String, String)>,
+    /// Mount/unmount calls in flight, keyed by `(strain, id)`. The
+    /// per-row toggle disables itself while its key is in this set
+    /// so a second polkit prompt cannot queue behind the first.
+    pub(crate) mount_in_flight: HashSet<(String, String)>,
 }
 
 /// Widget handles the event handlers reach back into. Cloning a GTK
@@ -635,6 +644,12 @@ fn apply_event(
         }
         Event::PurgeTombstonesResult(result) => {
             apply_purge_tombstones_result(widgets, state, result);
+        }
+        Event::MountSnapshotResult { strain, id, result } => {
+            apply_mount_snapshot_result(parent, widgets, state, cmd_tx, &strain, &id, result);
+        }
+        Event::UnmountSnapshotResult { strain, id, result } => {
+            apply_unmount_snapshot_result(widgets, state, cmd_tx, &strain, &id, result);
         }
     }
 }

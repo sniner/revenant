@@ -8,10 +8,13 @@ mod errors;
 mod marshal;
 mod mount;
 mod polkit;
+mod snapshot_mount;
 mod state;
 mod watcher;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sd_notify::NotifyState;
@@ -31,6 +34,12 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("revenantd {} starting", env!("CARGO_PKG_VERSION"));
+
+    // Reclaim any per-snapshot mounts a previous daemon instance left
+    // behind (it was killed before the umount path ran). Has to run
+    // before we spawn the idle-sweep task so we don't fight ourselves
+    // over the same paths.
+    snapshot_mount::recover_stale_at_startup();
 
     // Initialize state (config + toplevel mount). The state is held by
     // the D-Bus object; dropping the connection drops the object,
@@ -58,6 +67,21 @@ async fn main() -> Result<()> {
             .zip(cfg_guard.as_ref())
             .map(|(mount, cfg)| mount.path().join(&cfg.sys.snapshot_subvol))
     };
+
+    // Periodic idle-sweep + a separate handle for the explicit
+    // shutdown umount below — both reach into the shared state.
+    let state_for_sweep = Arc::clone(&state);
+    let state_for_shutdown = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(5 * 60));
+        // Skip the initial tick — there's nothing to sweep right after
+        // startup, and the recover-stale path already ran.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            state_for_sweep.snapshot_mounts.idle_sweep();
+        }
+    });
 
     let daemon = dbus::Daemon::new(state);
     let conn = zbus::connection::Builder::system()
@@ -124,6 +148,16 @@ async fn main() -> Result<()> {
 
     tracing::info!("shutting down");
     let _ = sd_notify::notify(false, &[NotifyState::Stopping]);
+
+    // Best-effort umount of every active snapshot mount before the
+    // connection (and with it the state Arc) is dropped. Run via
+    // spawn_blocking because this does sync mount(2) calls — keeping
+    // them off the runtime's reactor thread avoids stalling pending
+    // shutdown signal handlers in the same select arm.
+    tokio::task::spawn_blocking(move || state_for_shutdown.snapshot_mounts.shutdown())
+        .await
+        .ok();
+
     Ok(())
 }
 

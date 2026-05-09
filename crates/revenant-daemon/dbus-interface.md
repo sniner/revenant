@@ -40,10 +40,17 @@ UPower) rather than the systemd1/UDisks2 style of versioning the service name.
   and exits after an idle timeout (default 5 min) if no clients hold a
   watch.
 - On startup it mounts the btrfs toplevel (UUID from
-  `/etc/revenant/config.toml`) on `/run/revenant/toplevel` (private mount,
-  `MountFlags=private` in the unit so the host namespace is unaffected).
+  `/etc/revenant/config.toml`) on `/run/revenant/toplevel`. The unit
+  runs directly in the host's mount namespace (the unit deliberately
+  uses none of `ProtectSystem=`/`PrivateMounts=`/`ReadWritePaths=`,
+  all of which would put it into its own namespace and break
+  user-visibility of the per-snapshot mounts). Privacy of the
+  toplevel is enforced via mode 0700 on `/run/revenant/`; non-root
+  users cannot enter regardless of whether the mount appears in
+  /proc/mounts.
 - `inotify` watches the snapshot directory and the config directory.
-- On exit (clean or signal) the toplevel is unmounted.
+- On exit (clean or signal) the toplevel is unmounted, and any active
+  per-snapshot read-only mounts are best-effort umounted.
 
 ## Polkit actions
 
@@ -56,6 +63,7 @@ UPower) rather than the systemd1/UDisks2 style of versioning the service name.
 | `dev.sniner.Revenant.restore`         | `auth_admin`        | **Not** cached — restore is the riskiest action and should always re-prompt. |
 | `dev.sniner.Revenant.cleanup`         | `auth_admin_keep`   | Purges pre-restore DELETE markers.     |
 | `dev.sniner.Revenant.snapshot.protect`| `auth_admin_keep`   | Toggles the `protected` sidecar flag.  |
+| `dev.sniner.Revenant.snapshot.mount`  | `auth_admin_keep`   | Read-only browse-mount of a snapshot. Same action covers `MountSnapshot` and `UnmountSnapshot`. |
 
 The polkit policy file ships in `data/dev.sniner.Revenant.policy` and is
 installed to `/usr/share/polkit-1/actions/`.
@@ -156,7 +164,30 @@ DeleteSnapshot(strain: s, id: s) -> ()           -- privileged: dev.sniner.Reven
 SetSnapshotProtected(strain: s, id: s, protected: b) -> (a{sv})
                                                   -- privileged: dev.sniner.Revenant.snapshot.protect
                                                   --   returns the updated Snapshot dict
+MountSnapshot(strain: s, id: s) -> (a{ss})        -- privileged: dev.sniner.Revenant.snapshot.mount
+                                                  --   returns subvol_name -> mount_path
+UnmountSnapshot(strain: s, id: s) -> ()           -- privileged: dev.sniner.Revenant.snapshot.mount
 ```
+
+`MountSnapshot` mounts every subvolume of the snapshot read-only under
+`/run/user/<uid>/revenant/mounts/<strain>-<id>/<subvol>/`. `<uid>` is
+the calling client's UNIX uid (resolved via
+`org.freedesktop.DBus.GetConnectionUnixUser`); the per-uid tree is
+chowned to the caller so a file manager started in their session can
+traverse into it. Mount options are `subvol=…,ro,nodev,nosuid`; the
+mounted contents retain their original on-disk permissions, so a
+snapshot of a system rootfs is still root-owned inside.
+
+The call is idempotent: a second `MountSnapshot` for the same snapshot
+just refreshes the daemon's idle clock and returns the existing paths
+— no second mount appears in `/proc/mounts`.
+
+The daemon runs a background idle-sweep every 5 min. Any mount that
+has been untouched for 30 min (no new `MountSnapshot` call) and is
+not currently in use (the umount syscall does not return EBUSY) is
+reclaimed. Explicit `UnmountSnapshot` is the foreground tear-down;
+GUI-visible state usually flips back via this method, with the idle
+sweep as the safety net.
 
 `CreateSnapshot` and `DeleteSnapshot` complete well under a second
 on btrfs, so they return synchronously rather than going through the
@@ -315,7 +346,8 @@ back to a variant of `revenant_core::RevenantError`:
 3. **Mount lifecycle on idle exit.** If the daemon idles out and the
    toplevel was idle-mounted by it, it should umount on exit. If the user
    had it mounted manually for some reason — out of scope, daemon only
-   manages its own private mount under `/run/revenant/`.
+   manages its own mount under `/run/revenant/` and the per-snapshot
+   read-only mounts under `/run/user/<uid>/revenant/mounts/`.
 
 ## Out of scope (Phase 1)
 

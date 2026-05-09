@@ -6,6 +6,7 @@
 
 pub mod dialogs;
 pub mod format;
+pub mod mount;
 pub mod snapshots;
 pub mod strains;
 pub mod toast;

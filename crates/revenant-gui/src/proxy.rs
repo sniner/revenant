@@ -66,6 +66,10 @@ pub trait Daemon {
 
     fn restore(&self, strain: &str, id: &str, options: Dict) -> zbus::Result<Dict>;
 
+    fn mount_snapshot(&self, strain: &str, id: &str) -> zbus::Result<HashMap<String, String>>;
+
+    fn unmount_snapshot(&self, strain: &str, id: &str) -> zbus::Result<()>;
+
     // -- DELETE markers -----------------------------------------------
 
     fn list_delete_markers(&self) -> zbus::Result<Vec<Dict>>;

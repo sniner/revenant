@@ -18,6 +18,7 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::errors::DaemonError;
 use crate::mount::ToplevelMount;
+use crate::snapshot_mount::SnapshotMountManager;
 
 /// Why the daemon could not establish its full operating state. Each
 /// variant maps to a user-visible reason in `GetDaemonInfo`.
@@ -34,6 +35,10 @@ pub struct DaemonState {
     pub toplevel: Option<ToplevelMount>,
     pub backend: BtrfsBackend,
     pub degraded: Option<DegradedReason>,
+    /// Tracks per-snapshot read-only mounts requested by the GUI.
+    /// Lives as long as the daemon; on shutdown its `shutdown()`
+    /// best-effort umounts everything.
+    pub snapshot_mounts: SnapshotMountManager,
 }
 
 impl DaemonState {
@@ -62,6 +67,7 @@ impl DaemonState {
             toplevel: mount,
             backend: BtrfsBackend::new(),
             degraded,
+            snapshot_mounts: SnapshotMountManager::new(),
         })
     }
 

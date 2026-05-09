@@ -26,7 +26,10 @@ zbus = { workspace = true }
 zvariant = { workspace = true }
 
 # GUI-only dependencies — kept local to this crate.
-gtk = { package = "gtk4", version = "0.9" }
+# `v4_10` enables `gtk::FileLauncher`, used to open a snapshot's
+# read-only mount in the user's default file manager. GTK 4.10
+# shipped in 2023; every supported distro has it.
+gtk = { package = "gtk4", version = "0.9", features = ["v4_10"] }
 adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 
 # Runtime-agnostic channel: the dbus-worker pushes events from a

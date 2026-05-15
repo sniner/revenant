@@ -17,7 +17,7 @@ repository = "https://github.com/sniner/revenant"
 homepage = "https://github.com/sniner/revenant"
 
 [workspace.dependencies]
-revenant-core = { path = "crates/revenant-core" }
+revenant-core = { path = "crates/revenant-core", version = "0.2.5" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

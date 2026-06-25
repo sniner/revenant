@@ -266,6 +266,44 @@ subvolumes = [{subvol_list}]
     }
 
     #[test]
+    fn create_snapshot_records_nested_subvolumes() {
+        // Use a real toplevel directory so the best-effort sidecar write
+        // actually lands and we can read the recorded nested paths back off
+        // the returned metadata.
+        let tmp = std::env::temp_dir().join(format!("revenant-nested-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(tmp.join("@snapshots")).unwrap();
+        let toplevel = tmp.as_path();
+
+        let config = config_no_efi(&["@"]);
+        let mock = MockBackend::new();
+        mock.seed_subvolume(toplevel.join("@"));
+        mock.seed_subvolume(toplevel.join("@snapshots"));
+        // A nested subvolume present in the source at snapshot time.
+        mock.seed_subvolume(toplevel.join("@/var/lib/docker"));
+
+        let info = create_snapshot(
+            &config,
+            &mock,
+            toplevel,
+            "default",
+            TriggerKind::Unknown,
+            vec![],
+        )
+        .unwrap();
+
+        let meta = info
+            .metadata
+            .expect("sidecar should have been written to the real directory");
+        assert_eq!(
+            meta.nested_subvolumes.get("@").map(Vec::as_slice),
+            Some(["var/lib/docker".to_string()].as_slice()),
+            "create_snapshot must record the source's nested subvolumes"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
     fn create_snapshot_creates_snap_dir_if_missing() {
         let config = config_no_efi(&["@"]);
         let toplevel = Path::new("/top");

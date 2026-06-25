@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::{FileSystemBackend, subvol_exists};
@@ -30,10 +31,38 @@ pub fn create_snapshot(
     tracing::info!("creating snapshot {id} (strain: {strain_name})");
 
     let mut snapshotted_subvols = Vec::new();
+    // Nested subvolumes present in each source at snapshot time, recorded in
+    // the sidecar so restore can heal orphaned placeholders later (see
+    // `SnapshotMetadata::nested_subvolumes`).
+    let mut nested_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     // Snapshot all subvolumes in this strain
     for subvol in &strain_config.subvolumes {
         let src = toplevel.join(subvol);
+
+        // Record the live source's nested subvolumes *before* snapshotting.
+        // Best-effort: a failed enumeration must never abort an otherwise
+        // intact snapshot — it only costs the restore-time heal for this
+        // source if it later becomes relevant.
+        match backend.find_nested_subvolumes(&src) {
+            Ok(nested) if !nested.is_empty() => {
+                let rels: Vec<String> = nested
+                    .iter()
+                    .filter_map(|p| p.strip_prefix(&src).ok())
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !rels.is_empty() {
+                    nested_map.insert(subvol.clone(), rels);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "could not enumerate nested subvolumes in {} for metadata: {e}",
+                src.display()
+            ),
+        }
+
         let dest = snap_dir.join(id.snapshot_name(subvol, strain_name));
         tracing::info!("snapshotting {subvol} → {}", dest.display());
         backend.create_readonly_snapshot(&src, &dest)?;
@@ -83,7 +112,7 @@ pub fn create_snapshot(
 
     // Best-effort sidecar write: the subvolumes already exist, so metadata
     // loss is preferable to failing a snapshot that is otherwise intact.
-    let metadata = SnapshotMetadata::new(trigger, message);
+    let metadata = SnapshotMetadata::new(trigger, message).with_nested_subvolumes(nested_map);
     let sidecar = sidecar_path_for_snapshot(&snap_dir, strain_name, &info.id);
     match metadata::write(&sidecar, &metadata) {
         Ok(()) => info.metadata = Some(metadata),

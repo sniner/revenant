@@ -182,6 +182,101 @@ fn set_default_subvolume_does_not_error() {
 }
 
 #[test]
+fn find_nested_subvolumes_resolves_full_paths() {
+    // Exercises the tree-search + ino-lookup fast path end to end: the
+    // returned paths must be the exact absolute locations, including a
+    // nested subvol several directories deep (path resolved via INO_LOOKUP)
+    // and one sitting directly at the source root (empty INO_LOOKUP path).
+    let fs = TestFs::new();
+    let backend = BtrfsBackend::new();
+    let root = fs.mount.join("@");
+    backend.create_subvolume(&root).unwrap();
+
+    std::fs::create_dir_all(root.join("var/lib")).unwrap();
+    backend.create_subvolume(&root.join("var/lib/docker")).unwrap();
+    backend.create_subvolume(&root.join("srv")).unwrap();
+
+    let mut nested = backend.find_nested_subvolumes(&root).unwrap();
+    nested.sort();
+    assert_eq!(
+        nested,
+        vec![root.join("srv"), root.join("var/lib/docker")],
+        "tree-search enumeration must resolve full relative paths"
+    );
+}
+
+#[test]
+fn e2e_restore_heals_orphaned_nested_subvol_placeholder() {
+    // The faltix regression. A path that was a nested subvolume *when the
+    // snapshot was taken* but is no longer a nested subvolume at restore
+    // time: btrfs bakes an unwritable placeholder into the snapshot, and a
+    // naive restore leaves it live and unwritable — the exact state that
+    // broke dockerd's `mkdir /var/lib/docker/tmp`. Restore must heal it into
+    // a normal writable directory.
+    let fs = TestFs::new();
+    let backend = BtrfsBackend::new();
+    let config = e2e_config();
+
+    let root = fs.mount.join("@");
+    backend.create_subvolume(&root).unwrap();
+    std::fs::write(root.join("state.txt"), "before").unwrap();
+
+    // Nested subvolume present at snapshot time.
+    std::fs::create_dir_all(root.join("var/lib")).unwrap();
+    let nested = root.join("var/lib/docker");
+    backend.create_subvolume(&nested).unwrap();
+    std::fs::write(nested.join("payload"), "container-data").unwrap();
+
+    // Snapshot @ — records var/lib/docker as a nested subvol in the sidecar
+    // and (in the snapshot) leaves an unwritable placeholder there.
+    let snap = create_snapshot(
+        &config,
+        &backend,
+        &fs.mount,
+        "default",
+        TriggerKind::Unknown,
+        vec![],
+    )
+    .unwrap();
+    let snap_id = snap.id.clone();
+    assert!(
+        snap.metadata.as_ref().is_some_and(|m| m
+            .nested_subvolumes
+            .get("@")
+            .is_some_and(|v| v.iter().any(|p| p == "var/lib/docker"))),
+        "snapshot must record the nested subvol path in its sidecar"
+    );
+
+    distinct_second();
+
+    // The path stops being a nested subvolume before the rollback: delete
+    // the subvol and replace it with a plain directory, then mutate @.
+    backend.delete_subvolume(&nested).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(root.join("state.txt"), "after").unwrap();
+
+    // Roll back to the snapshot taken while the path was still nested.
+    let info = find_snapshot(&config, &backend, &fs.mount, &snap_id, Some("default")).unwrap();
+    restore_snapshot(&config, &backend, &fs.mount, &info).unwrap();
+
+    // @ rolled back …
+    assert_eq!(
+        std::fs::read_to_string(root.join("state.txt")).unwrap(),
+        "before"
+    );
+
+    // … and the formerly-nested path must now be a normal WRITABLE
+    // directory, not an unwritable placeholder.
+    let healed = root.join("var/lib/docker");
+    assert!(
+        backend.subvolume_info(&healed).is_err(),
+        "healed path must be a plain directory, not a subvolume"
+    );
+    std::fs::create_dir(healed.join("tmp"))
+        .expect("healed directory must be writable — this is the exact faltix mkdir that failed");
+}
+
+#[test]
 fn find_nested_subvolumes_walks_real_tree() {
     let fs = TestFs::new();
     let backend = BtrfsBackend::new();

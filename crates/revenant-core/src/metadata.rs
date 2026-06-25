@@ -15,7 +15,7 @@
 //! snapshot creation when the sidecar cannot be written — metadata loss is
 //! always preferable to a stranded half-created snapshot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -103,6 +103,24 @@ pub struct SnapshotMetadata {
     /// older sidecars stay one-line shorter.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub protected: bool,
+    /// Nested subvolumes that existed inside each snapshotted source
+    /// subvolume at the moment the snapshot was taken, keyed by source
+    /// subvol name with paths relative to that subvol root
+    /// (e.g. `{"@": ["var/lib/docker"]}`).
+    ///
+    /// btrfs does not recurse into nested subvolumes when snapshotting — it
+    /// leaves an *unwritable placeholder* directory at each nested location.
+    /// On restore, revenant re-attaches any nested subvolume that is still
+    /// live over its placeholder; but a path that was nested at snapshot
+    /// time and is no longer a live nested subvolume at restore time would
+    /// otherwise keep the placeholder as the live directory — unwritable,
+    /// breaking whatever owns the path. This list lets restore find those
+    /// orphaned placeholders deterministically and heal them.
+    ///
+    /// Strictly additive: snapshots without this field (legacy or external)
+    /// deserialise with an empty map and restore behaves exactly as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub nested_subvolumes: BTreeMap<String, Vec<String>>,
 }
 
 fn default_schema_version() -> u32 {
@@ -119,6 +137,7 @@ impl SnapshotMetadata {
             trigger,
             message,
             protected: false,
+            nested_subvolumes: BTreeMap::new(),
         }
     }
 
@@ -126,6 +145,13 @@ impl SnapshotMetadata {
     #[must_use]
     pub fn with_protected(mut self, protected: bool) -> Self {
         self.protected = protected;
+        self
+    }
+
+    /// Builder-style setter for the recorded nested-subvolume paths.
+    #[must_use]
+    pub fn with_nested_subvolumes(mut self, nested: BTreeMap<String, Vec<String>>) -> Self {
+        self.nested_subvolumes = nested;
         self
     }
 }
@@ -438,6 +464,55 @@ mod tests {
         );
         let loaded = read(&path).unwrap().unwrap();
         assert!(!loaded.protected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn round_trip_nested_subvolumes() {
+        let dir = tmpdir();
+        let path = dir.join("nested.meta.toml");
+        let mut nested = BTreeMap::new();
+        nested.insert(
+            "@".to_string(),
+            vec!["var/lib/docker".to_string(), "var/lib/machines".to_string()],
+        );
+        let meta = SnapshotMetadata::new(TriggerKind::SystemdPeriodic, vec![])
+            .with_nested_subvolumes(nested.clone());
+        write(&path, &meta).unwrap();
+        let loaded = read(&path).unwrap().unwrap();
+        assert_eq!(loaded.nested_subvolumes, nested);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn empty_nested_subvolumes_omitted_on_serialize() {
+        let dir = tmpdir();
+        let path = dir.join("noNested.meta.toml");
+        let meta = SnapshotMetadata::new(TriggerKind::Manual, vec!["note".into()]);
+        write(&path, &meta).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !serialized.contains("nested_subvolumes"),
+            "empty nested map must be skipped on serialize, got:\n{serialized}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_old_sidecar_without_nested_defaults_to_empty() {
+        // Backwards-compat: a sidecar written before the nested_subvolumes
+        // field existed must load cleanly with an empty map.
+        let dir = tmpdir();
+        let path = dir.join("legacy-nested.meta.toml");
+        let text = r#"
+schema_version = 1
+created_at = "2026-04-14T14:05:01+02:00"
+trigger = "manual"
+message = ["legacy"]
+"#;
+        std::fs::write(&path, text).unwrap();
+        let loaded = read(&path).unwrap().unwrap();
+        assert!(loaded.nested_subvolumes.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

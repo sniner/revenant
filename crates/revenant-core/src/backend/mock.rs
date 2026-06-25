@@ -45,6 +45,10 @@ struct MockState {
     /// code actually asks the backend to materialise the parent path
     /// before re-attaching a nested subvolume.
     created_dirs: Vec<PathBuf>,
+    /// Records every path passed to `remove_dir`, in call order. Like
+    /// `created_dirs`, a test hook — used to verify that restore clears an
+    /// orphaned nested-subvolume placeholder before recreating it.
+    removed_dirs: Vec<PathBuf>,
 }
 
 impl MockState {
@@ -134,6 +138,12 @@ impl MockBackend {
     /// regular directories, so this exists purely as a test hook.
     pub fn created_dirs(&self) -> Vec<PathBuf> {
         self.state.lock().unwrap().created_dirs.clone()
+    }
+
+    /// Return the list of paths that have been passed to `remove_dir`, in
+    /// call order. Test hook for the placeholder-heal path in restore.
+    pub fn removed_dirs(&self) -> Vec<PathBuf> {
+        self.state.lock().unwrap().removed_dirs.clone()
     }
 }
 
@@ -309,6 +319,18 @@ impl FileSystemBackend for MockBackend {
             .lock()
             .unwrap()
             .created_dirs
+            .push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<()> {
+        // Plain directories aren't tracked; record the call for assertions.
+        // A real backend would reject a non-empty directory, but the heal
+        // path only ever targets an empty placeholder.
+        self.state
+            .lock()
+            .unwrap()
+            .removed_dirs
             .push(path.to_path_buf());
         Ok(())
     }

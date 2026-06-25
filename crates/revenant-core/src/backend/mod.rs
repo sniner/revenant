@@ -83,6 +83,17 @@ pub trait FileSystemBackend: Send + Sync {
     /// older snapshot would strand the nested data in the DELETE marker.
     fn create_dir_all(&self, path: &Path) -> Result<()>;
 
+    /// Remove an empty directory at `path`. Mirrors `std::fs::remove_dir`
+    /// (fails if the directory is not empty).
+    ///
+    /// Used by `restore_snapshot` to clear an *orphaned nested-subvolume
+    /// placeholder*: when a snapshot was taken while a path was a nested
+    /// subvolume, btrfs leaves an unwritable stub directory at that path in
+    /// the snapshot. If that path is no longer a live nested subvolume at
+    /// restore time, there is nothing to re-attach over the stub, so restore
+    /// removes it and recreates a normal writable directory in its place.
+    fn remove_dir(&self, path: &Path) -> Result<()>;
+
     /// Find subvolumes nested directly inside `root`.
     ///
     /// Walks the directory tree under `root` but stops at every subvolume

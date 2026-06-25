@@ -47,6 +47,20 @@ impl BtrfsBackend {
 }
 
 impl BtrfsBackend {
+    /// Fast nested-subvolume enumeration via the btrfs root tree.
+    ///
+    /// Resolves `root`'s subvolume id, then lists its direct `ROOT_REF`
+    /// children and maps each back to an absolute path. O(nested
+    /// subvolumes) — no directory walk. Requires `root` to be a subvolume
+    /// root (the caller's `find_nested_subvolumes` falls back to a walk if
+    /// this errors).
+    fn find_nested_via_rootref(&self, root: &Path) -> Result<Vec<std::path::PathBuf>> {
+        let fd = Self::open_dir(root)?;
+        let info = ioctl::get_subvol_info(fd.as_fd(), root)?;
+        let rels = ioctl::nested_subvol_rel_paths(fd.as_fd(), info.treeid, root)?;
+        Ok(rels.into_iter().map(|rel| root.join(rel)).collect())
+    }
+
     fn find_nested_recursive(
         &self,
         dir: &Path,
@@ -176,9 +190,29 @@ impl FileSystemBackend for BtrfsBackend {
         fs::create_dir_all(path).map_err(|e| RevenantError::io(path, e))
     }
 
+    fn remove_dir(&self, path: &Path) -> Result<()> {
+        fs::remove_dir(path).map_err(|e| RevenantError::io(path, e))
+    }
+
     fn find_nested_subvolumes(&self, root: &Path) -> Result<Vec<std::path::PathBuf>> {
-        let mut nested = Vec::new();
-        self.find_nested_recursive(root, &mut nested)?;
-        Ok(nested)
+        // Fast path: enumerate via the root tree (O(nested subvolumes)).
+        match self.find_nested_via_rootref(root) {
+            Ok(nested) => Ok(nested),
+            Err(e) => {
+                // Fall back to a directory walk so a kernel or layout that
+                // rejects the tree-search/ino-lookup ioctls still gets
+                // correct results — at the cost of the O(directories) walk
+                // this optimisation exists to avoid. The warning makes a
+                // silently-degraded fast path visible.
+                tracing::warn!(
+                    "tree-search nested enumeration failed for {} ({e}); \
+                     falling back to directory walk",
+                    root.display()
+                );
+                let mut nested = Vec::new();
+                self.find_nested_recursive(root, &mut nested)?;
+                Ok(nested)
+            }
+        }
     }
 }

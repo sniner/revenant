@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::backend::{FileSystemBackend, subvol_exists};
 use crate::config::{Config, DELETE_STRAIN};
@@ -145,6 +146,38 @@ pub fn restore_snapshot(
             );
             backend.rename_subvolume(&from, &to)?;
         }
+
+        // (e) Heal orphaned nested-subvolume placeholders.  A path recorded
+        //     in the sidecar was a nested subvolume when this snapshot was
+        //     taken, so the snapshot carries an unwritable placeholder
+        //     directory there (btrfs does not recurse into nested subvols).
+        //     If that path is still a live nested subvolume it was just
+        //     re-attached over the placeholder above; but if it is no longer
+        //     nested, nothing replaced the placeholder and it would stay
+        //     live and unwritable — silently breaking whatever owns the path
+        //     (e.g. dockerd's /var/lib/docker).  Replace each such orphaned
+        //     placeholder with a normal writable directory.  Snapshots
+        //     without recorded nested paths (legacy/external) skip this
+        //     entirely and behave exactly as before.
+        let reattached: HashSet<PathBuf> = nested
+            .iter()
+            .filter_map(|p| p.strip_prefix(&current).ok().map(Path::to_path_buf))
+            .collect();
+        let recorded = snapshot
+            .metadata
+            .as_ref()
+            .and_then(|m| m.nested_subvolumes.get(subvol));
+        for rel in recorded.into_iter().flatten() {
+            let rel_path = Path::new(rel);
+            if reattached.contains(rel_path) {
+                continue; // a live nested subvolume already replaced it
+            }
+            let placeholder = current.join(rel_path);
+            if subvol_exists(backend, &placeholder) {
+                continue; // a real subvolume lives here — never touch it
+            }
+            heal_orphaned_placeholder(backend, &placeholder);
+        }
     }
 
     // 2b. Strip package-manager runtime state that is only meaningful
@@ -215,6 +248,34 @@ fn cleanup_stale_runtime_files(rootfs: &Path) {
                 }
             }
         }
+    }
+}
+
+/// Replace an orphaned nested-subvolume placeholder with a normal writable
+/// directory.
+///
+/// Best-effort: a failure here leaves the unwritable placeholder in place
+/// (the original symptom) but must never fail an otherwise-complete
+/// restore — by this point the live subvolume has already been swapped and
+/// the user is committed to rebooting into it. Both steps are logged so a
+/// failed heal is visible in diagnostics.
+fn heal_orphaned_placeholder(backend: &dyn FileSystemBackend, placeholder: &Path) {
+    tracing::info!(
+        "healing orphaned nested-subvolume placeholder {}",
+        placeholder.display()
+    );
+    if let Err(e) = backend.remove_dir(placeholder) {
+        tracing::warn!(
+            "could not remove placeholder {} ({e}); leaving it in place",
+            placeholder.display()
+        );
+        return;
+    }
+    if let Err(e) = backend.create_dir_all(placeholder) {
+        tracing::warn!(
+            "removed placeholder {} but could not recreate it as a writable directory: {e}",
+            placeholder.display()
+        );
     }
 }
 
@@ -568,6 +629,86 @@ subvolumes = [{subvol_list}]
 
         assert!(mock.contains("/top/@/var/lib/portables"));
         assert!(mock.contains("/top/@/var/lib/portables/inner"));
+    }
+
+    #[test]
+    fn heals_orphaned_placeholder_recorded_in_metadata() {
+        // The faltix scenario: /var/lib/docker was a nested subvolume when
+        // the snapshot was taken (recorded in the sidecar) but is no longer
+        // a live nested subvolume at restore time. btrfs leaves an
+        // unwritable placeholder; restore must heal it — remove_dir +
+        // create_dir_all at the recorded path — so the directory is usable.
+        use crate::metadata::SnapshotMetadata;
+        use std::collections::BTreeMap;
+
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+        seed_snapshot(&mock, &config, toplevel, "default", "20260316-143022");
+
+        let mut nested = BTreeMap::new();
+        nested.insert("@".to_string(), vec!["var/lib/docker".to_string()]);
+        let meta = SnapshotMetadata::new(TriggerKind::SystemdPeriodic, vec![])
+            .with_nested_subvolumes(nested);
+        let snap = SnapshotInfo {
+            id: SnapshotId::from_string("20260316-143022").unwrap(),
+            strain: "default".to_string(),
+            subvolumes: vec!["@".to_string()],
+            efi_synced: false,
+            metadata: Some(meta),
+        };
+
+        restore_snapshot(&config, &mock, toplevel, &snap).unwrap();
+
+        let placeholder = PathBuf::from("/top/@/var/lib/docker");
+        assert!(
+            mock.removed_dirs().contains(&placeholder),
+            "expected the orphaned placeholder to be removed, got: {:?}",
+            mock.removed_dirs()
+        );
+        assert!(
+            mock.created_dirs().contains(&placeholder),
+            "expected the placeholder to be recreated as a writable directory, got: {:?}",
+            mock.created_dirs()
+        );
+    }
+
+    #[test]
+    fn recorded_nested_still_live_is_reattached_not_healed() {
+        // A recorded nested path that is STILL a live nested subvolume must
+        // be re-attached (carried across at current state), never healed —
+        // healing would throw away live runtime data.
+        use crate::metadata::SnapshotMetadata;
+        use std::collections::BTreeMap;
+
+        let config = config_no_efi(&["@"]);
+        let toplevel = Path::new("/top");
+        let mock = setup_mock(&config, toplevel);
+        mock.seed_subvolume("/top/@/var/lib/docker");
+        seed_snapshot(&mock, &config, toplevel, "default", "20260316-143022");
+
+        let mut nested = BTreeMap::new();
+        nested.insert("@".to_string(), vec!["var/lib/docker".to_string()]);
+        let meta = SnapshotMetadata::new(TriggerKind::SystemdPeriodic, vec![])
+            .with_nested_subvolumes(nested);
+        let snap = SnapshotInfo {
+            id: SnapshotId::from_string("20260316-143022").unwrap(),
+            strain: "default".to_string(),
+            subvolumes: vec!["@".to_string()],
+            efi_synced: false,
+            metadata: Some(meta),
+        };
+
+        restore_snapshot(&config, &mock, toplevel, &snap).unwrap();
+
+        // Re-attached under the restored @ …
+        assert!(mock.contains("/top/@/var/lib/docker"));
+        // … and the heal path must not have touched it.
+        let placeholder = PathBuf::from("/top/@/var/lib/docker");
+        assert!(
+            !mock.removed_dirs().contains(&placeholder),
+            "a live nested subvolume must be re-attached, not healed"
+        );
     }
 
     #[test]

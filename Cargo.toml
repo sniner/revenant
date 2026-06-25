@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Stefan Schönberger <stefan@sniner.dev>"]
 license = "GPL-3.0-only"
 rust-version = "1.85"
@@ -17,7 +17,7 @@ repository = "https://github.com/sniner/revenant"
 homepage = "https://github.com/sniner/revenant"
 
 [workspace.dependencies]
-revenant-core = { path = "crates/revenant-core", version = "0.2.5" }
+revenant-core = { path = "crates/revenant-core", version = "0.2.6" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

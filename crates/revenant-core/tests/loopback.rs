@@ -193,7 +193,9 @@ fn find_nested_subvolumes_resolves_full_paths() {
     backend.create_subvolume(&root).unwrap();
 
     std::fs::create_dir_all(root.join("var/lib")).unwrap();
-    backend.create_subvolume(&root.join("var/lib/docker")).unwrap();
+    backend
+        .create_subvolume(&root.join("var/lib/docker"))
+        .unwrap();
     backend.create_subvolume(&root.join("srv")).unwrap();
 
     let mut nested = backend.find_nested_subvolumes(&root).unwrap();

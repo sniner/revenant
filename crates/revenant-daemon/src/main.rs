@@ -26,6 +26,16 @@ const CONFIG_DIR: &str = "/etc/revenant";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
+    // Answer informational flags before doing any privileged work
+    // (mounting the toplevel, claiming the bus name). The daemon is
+    // normally D-Bus/systemd-activated and takes no operational
+    // arguments, so anything passed on the command line is a human
+    // running it by hand to ask a question — it must not boot a full
+    // daemon as a side effect.
+    if handle_cli_flags() {
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -159,6 +169,45 @@ async fn main() -> Result<()> {
         .ok();
 
     Ok(())
+}
+
+/// Handle the only command-line flags `revenantd` understands
+/// (`--version`/`-V`, `--help`/`-h`) and return `true` if the process
+/// should exit without starting the daemon.
+///
+/// `revenantd` is not a general-purpose CLI: it is activated by D-Bus /
+/// systemd with no arguments (`ExecStart=/usr/bin/revenantd`). The only
+/// reason to pass arguments is a human inspecting it from a shell, so an
+/// unrecognised argument is a usage error rather than something to
+/// silently ignore by falling through into daemon startup.
+fn handle_cli_flags() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        return false;
+    }
+    // --version / --help short-circuit (mirroring clap), then anything else
+    // is a usage error — the daemon has no operational arguments.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("revenantd {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "revenantd {} — privileged D-Bus daemon for revenant-gui\n\
+             \n\
+             Usage: revenantd [--version | --help]\n\
+             \n\
+             Normally started on demand via D-Bus activation or systemd;\n\
+             it takes no operational arguments.",
+            env!("CARGO_PKG_VERSION")
+        );
+        return true;
+    }
+    eprintln!(
+        "revenantd: unrecognised argument '{}' (try --help)",
+        args[0]
+    );
+    std::process::exit(2);
 }
 
 /// Look up the served Daemon interface and emit `DaemonStateChanged`
